@@ -1,5 +1,5 @@
 pub mod model;
-
+pub mod lobby;
 use std::collections::HashMap;
 
 use axum::{
@@ -22,7 +22,7 @@ pub fn get_app() -> axum::Router {
         .layer(cors)
         .route(
             "/ws",
-            any(|ws: WebSocketUpgrade| async { ws.on_upgrade(handle_socket) }),
+            any(ws_handler),
         )
         .route(
             "/health",
@@ -46,14 +46,14 @@ pub fn get_app() -> axum::Router {
                 )
             }),
         )
-        //.with_state(AppState {})
+        .with_state(lobby::state::AppState::new())
 }
 
-/// state of the app that you pass for each request
-#[derive(Debug, Clone)]
-pub struct AppState {
-    lobbies: HashMap<i32, model::Lobby>,
+async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(handle_socket)
 }
+
+
 
 /// handles websocket messages
 pub async fn handle_socket(mut socket: axum::extract::ws::WebSocket) {
