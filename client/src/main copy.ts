@@ -13,9 +13,9 @@ import {
   Color3,
 } from "@babylonjs/core";
 
-import { Networking } from "./networking/message";
+import { NetworkClient } from "./networking/client";
 
-const net = new Networking();
+const net = new NetworkClient();
 
 async function bootstrap() {
   await net.connect();

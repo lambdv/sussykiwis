@@ -1,6 +1,5 @@
 pub mod model {
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
     use uuid::Uuid;
 
     /**
@@ -41,7 +40,7 @@ pub mod model {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct WelcomeMessage {
-        pub id: UUID,
+        pub id: Uuid,
         pub name: String,
     }
 
@@ -49,9 +48,10 @@ pub mod model {
 }
 
 pub mod request_handlers {
-    use crate::lobby::state::{AppState, GameState, Lobby, Player};
+    use crate::lobby::state::{AppState, Player};
+    use tracing::info;
 
-    use super::model::{ClientRequest, ServerResponse};
+    use super::model::{ClientRequest, ServerResponse, WelcomeMessage};
 
     use uuid::Uuid;
 
@@ -61,11 +61,8 @@ pub mod request_handlers {
         state: AppState,
     ) -> Result<ServerResponse, ()> {
         match req {
-            ClientRequest::Join => {
-                handle_join_request(state).await
-            }
+            ClientRequest::Join => handle_join_request(state).await,
             // ClientRequest::UpdatePosition(pos) => Err(()),
-            _ => Err(()),
         }
     }
 
@@ -84,7 +81,8 @@ pub mod request_handlers {
         let mut lobby = state.lobbies.get(&0).unwrap().lock().await;
 
         lobby.add_player(player);
-        Ok(ServerResponse::Welcome(model::WelcomeMessage {
+        info!("player joined lobby");
+        Ok(ServerResponse::Welcome(WelcomeMessage {
             id: uuid,
             name: "Player 1".to_string(),
         }))

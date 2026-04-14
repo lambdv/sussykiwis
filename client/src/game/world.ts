@@ -13,12 +13,7 @@ import {
   Color3,
 } from "@babylonjs/core";
 
-import { Networking } from "./networking/message";
-
-const net = new Networking();
-
-async function bootstrap() {
-  await net.connect();
+(async () => {
   const canvas = document.getElementById(
     "renderCanvas",
   ) as HTMLCanvasElement | null;
@@ -141,8 +136,4 @@ async function bootstrap() {
   window.addEventListener("beforeunload", () => {
     joystickManager?.destroy();
   });
-}
-
-await bootstrap();
-
-await net.sendMessage({ type: "join" });
+})();

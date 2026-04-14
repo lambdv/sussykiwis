@@ -13,12 +13,14 @@ use axum::{
     routing::{any, get},
 };
 use serde_json::json;
+use tower_http::trace::TraceLayer;
 
 pub fn get_app() -> axum::Router {
     let cors = tower_http::cors::CorsLayer::new()
         .allow_methods([http::Method::GET, http::Method::POST])
         .allow_origin(tower_http::cors::Any);
     axum::Router::new()
+        .layer(TraceLayer::new_for_http())
         .layer(cors)
         .route(
             "/ws",
