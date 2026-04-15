@@ -1,4 +1,6 @@
 import type { ClientMessage } from "./message";
+
+/** module for communcating with the server */
 export class NetworkClient {
   connection: WebSocket | null = null;
   readonly url = "ws://localhost:3000/ws";
