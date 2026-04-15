@@ -1,5 +1,3 @@
-import "./style.css";
-import nipplejs from "nipplejs";
 import {
   Engine,
   Scene,
@@ -13,40 +11,10 @@ import {
   Color3,
 } from "@babylonjs/core";
 
-import { NetworkClient } from "./networking/client";
-
-const net = new NetworkClient();
-
-async function bootstrap() {
-  await net.connect();
-  const canvas = document.getElementById(
-    "renderCanvas",
-  ) as HTMLCanvasElement | null;
-  const joystickZone = document.getElementById(
-    "joystickZone",
-  ) as HTMLDivElement | null;
-
-  if (!canvas || !joystickZone) {
-    throw new Error("Missing required canvas or joystick container");
-  }
-
-  let engine: Engine | WebGPUEngine;
-
-  if (await WebGPUEngine.IsSupportedAsync) {
-    const webgpuEngine = new WebGPUEngine(canvas, {
-      stencil: true,
-      antialias: true,
-    });
-    await webgpuEngine.initAsync();
-    engine = webgpuEngine;
-  } else {
-    engine = new Engine(canvas, true, {
-      preserveDrawingBuffer: false,
-      stencil: true,
-      antialias: true,
-    });
-  }
-
+export default function GameScene(
+  engine: Engine | WebGPUEngine,
+  joystickZone: HTMLDivElement | null,
+) {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
 
@@ -133,16 +101,9 @@ async function bootstrap() {
     camera.setTarget(player.position);
     scene.render();
   });
-
-  window.addEventListener("resize", () => {
-    engine.resize();
-  });
-
   window.addEventListener("beforeunload", () => {
     joystickManager?.destroy();
   });
+
+  return scene;
 }
-
-await bootstrap();
-
-await net.sendMessage({ type: "join" });
