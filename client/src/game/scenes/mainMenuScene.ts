@@ -1,108 +1,117 @@
 import {
   Engine,
   Scene,
-  ArcRotateCamera,
-  Vector3,
   Color4,
   HemisphericLight,
+  Vector3,
   MeshBuilder,
-  WebGPUEngine,
   StandardMaterial,
   Color3,
+  WebGPUEngine,
 } from "@babylonjs/core";
+import {
+  AdvancedDynamicTexture,
+  StackPanel,
+  TextBlock,
+  Button,
+  Control,
+} from "@babylonjs/gui";
+import { gameState } from "../../state";
+import { net } from "../../main";
 
-export default function GameScene(
-  engine: Engine | WebGPUEngine,
-  joystickZone: HTMLDivElement | null,
-) {
+export function createMenuScene(engine: Engine | WebGPUEngine): Scene {
   const scene = new Scene(engine);
-  scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
+  scene.clearColor = new Color4(0.1, 0.15, 0.25, 1);
 
-  const camera = new ArcRotateCamera(
-    "camera",
-    Math.PI / 4,
-    Math.PI / 3,
-    50,
-    Vector3.Zero(),
-    scene,
-  );
+  // Basic lighting
+  const light = new HemisphericLight("light", new Vector3(0, 1, 0), scene);
+  light.intensity = 0.8;
 
-  const light = new HemisphericLight("light", new Vector3(0, 1, 0.3), scene);
-  light.intensity = 1;
+  // Simple ground plane
+  const ground = MeshBuilder.CreateGround("ground", { width: 50, height: 50 }, scene);
+  const groundMat = new StandardMaterial("groundMat", scene);
+  groundMat.diffuseColor = Color3.FromHexString("#1a1a2e");
+  groundMat.specularColor = Color3.Black();
+  ground.material = groundMat;
+  ground.position.y = -2;
 
-  const ground = MeshBuilder.CreateBox(
-    "ground",
-    { width: 30, height: 1, depth: 10 },
-    scene,
-  );
-  ground.position.y = -0.5;
+  // Full-screen GUI
+  const gui = AdvancedDynamicTexture.CreateFullscreenUI("MenuUI");
 
-  const player = MeshBuilder.CreateSphere("sphere", { diameter: 2 }, scene);
+  // Main container
+  const mainPanel = new StackPanel();
+  mainPanel.verticalAlignment = Control.VERTICAL_ALIGNMENT_CENTER;
+  mainPanel.horizontalAlignment = Control.HORIZONTAL_ALIGNMENT_CENTER;
+  gui.addControl(mainPanel);
 
-  const playerMat = new StandardMaterial("playerMat", scene);
-  playerMat.diffuseColor = Color3.FromHexString("#ebb0ff");
-  player.material = playerMat;
-  player.position.y = 2;
+  // Title
+  const title = new TextBlock();
+  title.text = "SUSSY KIWIS";
+  title.color = "#ebb0ff";
+  title.fontSize = 80;
+  title.height = "120px";
+  title.shadowColor = "#000";
+  title.shadowBlur = 10;
+  mainPanel.addControl(title);
 
-  const moveInput = {
-    x: 0,
-    y: 0,
-  };
+  // Subtitle
+  const subtitle = new TextBlock();
+  subtitle.text = "Catch the imposter!";
+  subtitle.color = "#ffffff";
+  subtitle.fontSize = 24;
+  subtitle.height = "40px";
+  mainPanel.addControl(subtitle);
 
-  let joystickManager: ReturnType<typeof nipplejs.create> | null = null;
-  joystickZone.classList.add("is-active");
+  // Spacing
+  const spacer = new TextBlock();
+  spacer.height = "60px";
+  mainPanel.addControl(spacer);
 
-  joystickManager = nipplejs.create({
-    zone: joystickZone,
-    mode: "static",
-    position: { left: "50%", top: "50%" },
-    size: 130,
-    threshold: 0.08,
-    color: {
-      back: "rgba(255, 255, 255, 0.5)",
-      front: "linear-gradient(145deg, #f97316, #ef4444)",
-    },
-    restOpacity: 0.65,
-    fadeTime: 140,
+  // Play Button
+  const playBtn = Button.CreateSimpleButton("playBtn", "PLAY");
+  playBtn.width = "220px";
+  playBtn.height = "70px";
+  playBtn.color = "white";
+  playBtn.cornerRadius = 15;
+  playBtn.background = "linear-gradient(145deg, #f97316, #ef4444)";
+  playBtn.fontSize = 32;
+  playBtn.thickness = 0;
+  playBtn.onPointerClickObservable.add(() => {
+    net.sendMessage({ type: "join" });
+    gameState.set("QUEUE");
   });
+  mainPanel.addControl(playBtn);
 
-  // Capture joystick vector each frame so movement can be applied in the render loop.
-  joystickManager.on("move", (event) => {
-    moveInput.x = event.data.vector.x;
-    moveInput.y = event.data.vector.y;
-  });
+  // Queue overlay (hidden initially)
+  const queueOverlay = new StackPanel();
+  queueOverlay.isVisible = false;
+  queueOverlay.verticalAlignment = Control.VERTICAL_ALIGNMENT_CENTER;
+  queueOverlay.horizontalAlignment = Control.HORIZONTAL_ALIGNMENT_CENTER;
+  queueOverlay.background = "rgba(0, 0, 0, 0.7)";
+  gui.addControl(queueOverlay);
 
-  // Reset movement when the thumb is released.
-  joystickManager.on("end", () => {
-    moveInput.x = 0;
-    moveInput.y = 0;
-  });
+  const queueText = new TextBlock();
+  queueText.text = "Searching...";
+  queueText.color = "white";
+  queueText.fontSize = 48;
+  queueOverlay.addControl(queueText);
 
-  const moveSpeed = 10;
+  const queueSubtext = new TextBlock();
+  queueSubtext.text = "Waiting for players...";
+  queueSubtext.color = "#cccccc";
+  queueSubtext.fontSize = 20;
+  queueSubtext.height = "40px";
+  queueOverlay.addControl(queueSubtext);
 
-  engine.runRenderLoop(() => {
-    const deltaSeconds = engine.getDeltaTime() / 1000;
-
-    // Flatten camera forward direction onto XZ so movement stays on the ground plane.
-    const forward = camera.getForwardRay().direction;
-    forward.y = 0;
-    forward.normalize();
-
-    // Build a right vector from forward and transform joystick input into world-space movement.
-    const right = new Vector3(forward.z, 0, -forward.x);
-    const moveWorldX = right.x * moveInput.x + forward.x * moveInput.y;
-    const moveWorldZ = right.z * moveInput.x + forward.z * moveInput.y;
-    const moveLength = Math.hypot(moveWorldX, moveWorldZ);
-    const moveScale = moveLength > 1 ? 1 / moveLength : 1;
-
-    player.position.x += moveWorldX * moveScale * moveSpeed * deltaSeconds;
-    player.position.z += moveWorldZ * moveScale * moveSpeed * deltaSeconds;
-
-    camera.setTarget(player.position);
-    scene.render();
-  });
-  window.addEventListener("beforeunload", () => {
-    joystickManager?.destroy();
+  // Subscribe to state changes
+  gameState.onChange((state) => {
+    if (state === "QUEUE") {
+      queueOverlay.isVisible = true;
+      playBtn.isEnabled = false;
+    } else {
+      queueOverlay.isVisible = false;
+      playBtn.isEnabled = true;
+    }
   });
 
   return scene;

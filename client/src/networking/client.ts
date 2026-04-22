@@ -1,21 +1,29 @@
-import type { ClientMessage } from "./message";
+import type { ClientMessage, ServerMessage } from "./message";
 
-/** module for communcating with the server */
+type MessageHandler = (msg: ServerMessage) => void;
+
 export class NetworkClient {
   connection: WebSocket | null = null;
   readonly url = "ws://localhost:3000/ws";
+  private messageHandlers: MessageHandler[] = [];
 
   async connect(): Promise<void> {
     if (this.connection?.OPEN) return;
 
     return await new Promise<void>((res, rej) => {
       this.connection = new WebSocket(this.url);
+
       this.connection.onopen = () => {
         res();
       };
 
       this.connection.onerror = () => {
         rej(new Error("Failed to connect socket"));
+      };
+
+      this.connection.onmessage = (event) => {
+        const msg = JSON.parse(event.data) as ServerMessage;
+        this.messageHandlers.forEach((handler) => handler(msg));
       };
 
       this.connection.onclose = () => {
@@ -32,5 +40,9 @@ export class NetworkClient {
 
   isConnected(): boolean {
     return !!this.connection && this.connection.readyState === WebSocket.OPEN;
+  }
+
+  onMessage(handler: MessageHandler) {
+    this.messageHandlers.push(handler);
   }
 }
