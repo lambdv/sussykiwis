@@ -3,7 +3,10 @@ import type { ServerMessage } from "./networking/message";
 import {
   Engine,
   Scene,
+  Color4,
   WebGPUEngine,
+  FreeCamera,
+  Vector3,
 } from "@babylonjs/core";
 
 import { createMenuScene } from "./game/scenes/mainMenuScene";
@@ -21,8 +24,12 @@ let joystickZone: HTMLDivElement;
 async function bootstrap() {
   await net.connect();
 
-  const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement | null;
-  const joystickZoneEl = document.getElementById("joystickZone") as HTMLDivElement | null;
+  const canvas = document.getElementById(
+    "renderCanvas",
+  ) as HTMLCanvasElement | null;
+  const joystickZoneEl = document.getElementById(
+    "joystickZone",
+  ) as HTMLDivElement | null;
 
   if (!canvas || !joystickZoneEl) {
     throw new Error("Missing required canvas or joystick container");
@@ -47,6 +54,7 @@ async function bootstrap() {
   const menuScene = createMenuScene(engine);
   activeScene = menuScene;
 
+  // Start the render loop for babylon
   engine.runRenderLoop(() => {
     activeScene.render();
   });

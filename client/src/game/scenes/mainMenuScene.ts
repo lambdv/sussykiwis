@@ -8,6 +8,7 @@ import {
   StandardMaterial,
   Color3,
   WebGPUEngine,
+  FreeCamera,
 } from "@babylonjs/core";
 import {
   AdvancedDynamicTexture,
@@ -23,12 +24,21 @@ export function createMenuScene(engine: Engine | WebGPUEngine): Scene {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.1, 0.15, 0.25, 1);
 
+  const camera = new FreeCamera("menuCamera", new Vector3(0, 0, -10), scene);
+
+  camera.setTarget(Vector3.Zero());
+  scene.activeCamera = camera;
+
   // Basic lighting
   const light = new HemisphericLight("light", new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;
 
   // Simple ground plane
-  const ground = MeshBuilder.CreateGround("ground", { width: 50, height: 50 }, scene);
+  const ground = MeshBuilder.CreateGround(
+    "ground",
+    { width: 50, height: 50 },
+    scene,
+  );
   const groundMat = new StandardMaterial("groundMat", scene);
   groundMat.diffuseColor = Color3.FromHexString("#1a1a2e");
   groundMat.specularColor = Color3.Black();

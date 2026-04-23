@@ -13,7 +13,7 @@ import {
   Color3,
 } from "@babylonjs/core";
 
-(async () => {
+export async function createWorldScene(engine: Engine | WebGPUEngine): Scene {
   const canvas = document.getElementById(
     "renderCanvas",
   ) as HTMLCanvasElement | null;
@@ -25,7 +25,7 @@ import {
     throw new Error("Missing required canvas or joystick container");
   }
 
-  let engine: Engine | WebGPUEngine;
+  //let engine: Engine | WebGPUEngine;
 
   if (await WebGPUEngine.IsSupportedAsync) {
     const webgpuEngine = new WebGPUEngine(canvas, {
@@ -136,4 +136,7 @@ import {
   window.addEventListener("beforeunload", () => {
     joystickManager?.destroy();
   });
-})();
+  const scene = new Scene(engine);
+
+  return scene;
+}
