@@ -1,41 +1,17 @@
 import "./style.css";
-import type { ServerMessage } from "./networking/message";
-import {
-  Engine,
-  Scene,
-  Color4,
-  WebGPUEngine,
-  FreeCamera,
-  Vector3,
-} from "@babylonjs/core";
-
-import { createMenuScene } from "./game/scenes/mainMenuScene";
-import { createGameScene } from "./game/scenes/gameScene";
-import { NetworkClient } from "./networking/client";
-import { gameState } from "./state";
-
-export const net = new NetworkClient();
-
-let engine: Engine | WebGPUEngine;
-let activeScene: Scene;
-let gameSceneResult: ReturnType<typeof createGameScene> | null = null;
-let joystickZone: HTMLDivElement;
+import { Engine, WebGPUEngine } from "@babylonjs/core";
+import { App } from "./app/app";
 
 async function bootstrap() {
-  await net.connect();
-
   const canvas = document.getElementById(
     "renderCanvas",
   ) as HTMLCanvasElement | null;
-  const joystickZoneEl = document.getElementById(
-    "joystickZone",
-  ) as HTMLDivElement | null;
 
-  if (!canvas || !joystickZoneEl) {
-    throw new Error("Missing required canvas or joystick container");
-  }
-  joystickZone = joystickZoneEl;
+  if (!canvas) throw new Error("Missing required canvas or joystick container");
 
+  let engine: Engine | WebGPUEngine;
+
+  // either web gpu or default engine
   if (await WebGPUEngine.IsSupportedAsync) {
     const webgpuEngine = new WebGPUEngine(canvas, {
       stencil: true,
@@ -51,60 +27,16 @@ async function bootstrap() {
     });
   }
 
-  const menuScene = createMenuScene(engine);
-  activeScene = menuScene;
+  const app = new App(engine, canvas);
+  app.start();
 
-  // Start the render loop for babylon
   engine.runRenderLoop(() => {
-    activeScene.render();
+    app.tick();
   });
 
   window.addEventListener("resize", () => {
     engine.resize();
   });
-
-  net.onMessage((msg: ServerMessage) => {
-    if (msg.type === "match") {
-      gameState.set("GAME");
-    }
-  });
-
-  gameState.onChange((state) => {
-    switch (state) {
-      case "MENU":
-        if (gameSceneResult) {
-          gameSceneResult.stop();
-          gameSceneResult = null;
-        }
-        activeScene = menuScene;
-        joystickZone.style.display = "none";
-        break;
-
-      case "QUEUE":
-        joystickZone.style.display = "none";
-        break;
-
-      case "GAME":
-        if (!gameSceneResult) {
-          gameSceneResult = createGameScene(engine, joystickZone);
-        }
-        gameSceneResult.start();
-        activeScene = gameSceneResult.scene;
-        joystickZone.style.display = "block";
-        break;
-
-      case "GAME_END":
-        if (gameSceneResult) {
-          gameSceneResult.stop();
-        }
-        activeScene = menuScene;
-        joystickZone.style.display = "none";
-        gameState.set("MENU");
-        break;
-    }
-  });
 }
 
 await bootstrap();
-
-net.sendMessage({ type: "join" });

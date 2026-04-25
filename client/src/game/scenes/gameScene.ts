@@ -12,16 +12,18 @@ import {
   Color3,
 } from "@babylonjs/core";
 
-export interface GameSceneResult {
+export interface SceneResult {
   scene: Scene;
   start: () => void;
   stop: () => void;
+  render: () => void;
+  dispose: () => void;
 }
 
 export function createGameScene(
   engine: Engine | WebGPUEngine,
-  joystickZone: HTMLDivElement,
-): GameSceneResult {
+  joystickZone: HTMLDivElement = document.createElement("div"),
+): SceneResult {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
 
@@ -126,5 +128,7 @@ export function createGameScene(
     scene,
     start,
     stop,
+    render: () => scene.render(),
+    dispose: () => scene.dispose(),
   };
 }
