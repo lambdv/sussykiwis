@@ -1,19 +1,17 @@
-/// client messages
-export type ClientMessage = JoinMessage;
-
-export type JoinMessage = {
+// Client->server messages currently supported by the Rust lobby.
+export type ClientMessage = {
   type: "join";
 };
 
-/// server messages
-export type ServerMessage = JoinResponseMessage | MatchMessage;
-
-export type JoinResponseMessage = {
-  type: "join_response";
-  name: string;
-};
-
-export type MatchMessage = {
-  type: "match";
-  playerCount: number;
-};
+// Server->client messages handled today (including serde externally tagged enum).
+export type ServerMessage =
+  | {
+      Welcome: {
+        id: string;
+        name: string;
+      };
+    }
+  | {
+      type: string;
+      [key: string]: unknown;
+    };

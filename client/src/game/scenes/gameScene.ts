@@ -1,29 +1,22 @@
 import nipplejs from "nipplejs";
 import {
-  Engine,
-  Scene,
   ArcRotateCamera,
-  Vector3,
+  Color3,
   Color4,
+  Engine,
   HemisphericLight,
   MeshBuilder,
-  WebGPUEngine,
+  Scene,
   StandardMaterial,
-  Color3,
+  Vector3,
+  WebGPUEngine,
 } from "@babylonjs/core";
-
-export interface SceneResult {
-  scene: Scene;
-  start: () => void;
-  stop: () => void;
-  render: () => void;
-  dispose: () => void;
-}
 
 export function createGameScene(
   engine: Engine | WebGPUEngine,
-  joystickZone: HTMLDivElement = document.createElement("div"),
-): SceneResult {
+  canvas: HTMLCanvasElement,
+): Scene {
+  // Build the main gameplay scene with camera, lighting, and player mesh.
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
 
@@ -35,6 +28,7 @@ export function createGameScene(
     Vector3.Zero(),
     scene,
   );
+  camera.attachControl(canvas, true);
 
   const light = new HemisphericLight("light", new Vector3(0, 1, 0.3), scene);
   light.intensity = 1;
@@ -47,18 +41,22 @@ export function createGameScene(
   ground.position.y = -0.5;
 
   const player = MeshBuilder.CreateSphere("sphere", { diameter: 2 }, scene);
-
   const playerMat = new StandardMaterial("playerMat", scene);
   playerMat.diffuseColor = Color3.FromHexString("#ebb0ff");
   player.material = playerMat;
   player.position.y = 2;
 
+  // Track directional joystick input so we can move the player every frame.
   const moveInput = { x: 0, y: 0 };
   const moveSpeed = 10;
 
+  // Try to attach the mobile joystick if the zone is present in DOM.
+  const joystickZone = document.getElementById("joystickZone") as
+    | HTMLDivElement
+    | null;
   let joystickManager: ReturnType<typeof nipplejs.create> | null = null;
 
-  function initJoystick() {
+  if (joystickZone) {
     joystickZone.classList.add("is-active");
 
     joystickManager = nipplejs.create({
@@ -67,68 +65,51 @@ export function createGameScene(
       position: { left: "50%", top: "50%" },
       size: 130,
       threshold: 0.08,
-      color: {
-        back: "rgba(255, 255, 255, 0.5)",
-        front: "linear-gradient(145deg, #f97316, #ef4444)",
-      },
+      color: "white",
       restOpacity: 0.65,
       fadeTime: 140,
     });
 
-    joystickManager.on("move", (event) => {
-      moveInput.x = event.data.vector.x;
-      moveInput.y = event.data.vector.y;
+    // Use loose event typing because nipplejs' TS event overloads are incomplete.
+    (joystickManager as any).on("move", (_event: unknown, data: any) => {
+      const vector = data?.vector;
+      if (!vector) return;
+      moveInput.x = vector.x;
+      moveInput.y = vector.y;
     });
 
-    joystickManager.on("end", () => {
+    (joystickManager as any).on("end", () => {
       moveInput.x = 0;
       moveInput.y = 0;
     });
   }
 
-  function destroyJoystick() {
-    if (joystickManager) {
-      joystickManager.destroy();
-      joystickManager = null;
-    }
-    joystickZone.classList.remove("is-active");
-  }
+  // Update player movement in the scene render lifecycle.
+  scene.onBeforeRenderObservable.add(() => {
+    const deltaSeconds = engine.getDeltaTime() / 1000;
 
-  function start() {
-    initJoystick();
+    const forward = camera.getForwardRay().direction;
+    forward.y = 0;
+    forward.normalize();
 
-    engine.runRenderLoop(() => {
-      const deltaSeconds = engine.getDeltaTime() / 1000;
+    const right = new Vector3(forward.z, 0, -forward.x);
+    const moveWorldX = right.x * moveInput.x + forward.x * moveInput.y;
+    const moveWorldZ = right.z * moveInput.x + forward.z * moveInput.y;
+    const moveLength = Math.hypot(moveWorldX, moveWorldZ);
+    const moveScale = moveLength > 1 ? 1 / moveLength : 1;
 
-      const forward = camera.getForwardRay().direction;
-      forward.y = 0;
-      forward.normalize();
+    player.position.x += moveWorldX * moveScale * moveSpeed * deltaSeconds;
+    player.position.z += moveWorldZ * moveScale * moveSpeed * deltaSeconds;
 
-      const right = new Vector3(forward.z, 0, -forward.x);
-      const moveWorldX = right.x * moveInput.x + forward.x * moveInput.y;
-      const moveWorldZ = right.z * moveInput.x + forward.z * moveInput.y;
-      const moveLength = Math.hypot(moveWorldX, moveWorldZ);
-      const moveScale = moveLength > 1 ? 1 / moveLength : 1;
+    camera.setTarget(player.position);
+  });
 
-      player.position.x += moveWorldX * moveScale * moveSpeed * deltaSeconds;
-      player.position.z += moveWorldZ * moveScale * moveSpeed * deltaSeconds;
+  // Release joystick resources when leaving the game scene.
+  scene.onDisposeObservable.add(() => {
+    joystickManager?.destroy();
+    joystickManager = null;
+    joystickZone?.classList.remove("is-active");
+  });
 
-      camera.setTarget(player.position);
-      scene.render();
-    });
-  }
-
-  function stop() {
-    engine.stopRenderLoop();
-    destroyJoystick();
-    player.position.set(0, 2, 0);
-  }
-
-  return {
-    scene,
-    start,
-    stop,
-    render: () => scene.render(),
-    dispose: () => scene.dispose(),
-  };
+  return scene;
 }
