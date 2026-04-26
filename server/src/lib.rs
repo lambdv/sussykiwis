@@ -1,5 +1,5 @@
-pub mod model;
 pub mod lobby;
+pub mod model;
 use std::collections::HashMap;
 
 use axum::{
@@ -15,17 +15,24 @@ use axum::{
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
+pub struct Config {
+    pub tick_rate: u32,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self { tick_rate: 20 }
+    }
+}
+
 pub fn get_app() -> axum::Router {
+    let config = Config::default();
     let cors = tower_http::cors::CorsLayer::new()
         .allow_methods([http::Method::GET, http::Method::POST])
         .allow_origin(tower_http::cors::Any);
     axum::Router::new()
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .route(
-            "/ws",
-            any(ws_handler),
-        )
+        .route("/ws", any(ws_handler))
         .route(
             "/health",
             get(|| async {
@@ -54,8 +61,6 @@ pub fn get_app() -> axum::Router {
 async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(handle_socket)
 }
-
-
 
 /// handles websocket messages
 pub async fn handle_socket(mut socket: axum::extract::ws::WebSocket) {
