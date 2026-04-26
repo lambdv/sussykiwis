@@ -15,27 +15,21 @@ pub mod model {
     pub enum ClientRequest {
         /// Join request (e.g., join a lobby or server)
         Join,
-        //UpdatePosition(Position),
+        Input(InputMessage),
     }
 
-    // Uncomment and implement if server wants to handle symmetric responses
-    // #[derive(Debug, Clone, Serialize, Deserialize)]
-    // pub enum Response {
-    //     Join,
-    //     UpdatePosition(Position),
-    // }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct InputMessage {
+        pub seq: u32,
+        pub move_x: f32,
+        pub move_y: f32,
+    }
 
     /// Enum for server responses to the client.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum ServerResponse {
         Welcome(WelcomeMessage),
-    }
-
-    /// Represents a position in 2D space (x, y).
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Position {
-        pub x: f32,
-        pub y: f32,
+        WorldSnapshot(WorldSnapshot), // sync
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +38,19 @@ pub mod model {
         pub name: String,
     }
 
-    // End of message models
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct WorldSnapshot {
+        pub server_time: u64,
+        pub players: Vec<PlayerSnapshot>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PlayerSnapshot {
+        pub id: Uuid,
+        pub name: String,
+        pub x: f32,
+        pub y: f32,
+    }
 }
 
 pub mod request_handlers {
@@ -69,7 +75,8 @@ pub mod request_handlers {
     ///handles join requests
     pub async fn handle_join_request(state: AppState) -> Result<ServerResponse, ()> {
         // make player
-        let uuid = Uuid::default();
+        let uuid = Uuid::new_v4();
+
         let player = Player {
             id: uuid,
             name: "Player 1".to_string(),
