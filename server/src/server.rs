@@ -12,15 +12,16 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{any, get},
 };
+use futures_util::{SinkExt, stream::StreamExt};
 use serde_json::json;
-use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc};
 use tower_http::trace::TraceLayer;
 
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::{AppState, GameCommand, ServerEvent};
+use crate::lobby::simulation::start_simulation;
+use crate::{GameCommand, ServerEvent};
 
 // server configuration
 pub struct Config {
@@ -42,7 +43,17 @@ pub async fn start_server(config: Config) -> Result<(), Box<dyn std::error::Erro
     let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
     info!(%addr, "server listening");
 
-    let app = get_app_router();
+    // tokio sync channels for communicating with the game loop task
+    let (game_tx, _game_rx) = mpsc::channel::<GameCommand>(100);
+    let (event_tx, _event_rx) = broadcast::channel::<ServerEvent>(100);
+
+    let state = ServerContext::new(game_tx, event_tx);
+    // start the game loop in a separate task, it will receive client commands and produce server events for the ws sessions
+
+    tokio::spawn(start_simulation(game_rx, event_tx.clone()));
+
+    let app = get_app_router(state);
+
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -67,13 +78,11 @@ impl ServerContext {
 }
 
 // the server app router
-pub fn get_app_router() -> axum::Router {
+pub fn get_app_router(state: ServerContext) -> axum::Router {
+    // cross origin resource sharing policy for ws and http endpoints
     let cors = tower_http::cors::CorsLayer::new()
         .allow_methods([http::Method::GET, http::Method::POST])
         .allow_origin(tower_http::cors::Any);
-    let (game_tx, _game_rx) = mpsc::channel::<GameCommand>(100);
-    let (event_tx, _event_rx) = broadcast::channel::<ServerEvent>(100);
-    let state = ServerContext::new(game_tx, event_tx);
 
     axum::Router::new()
         .layer(TraceLayer::new_for_http())
@@ -109,8 +118,169 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
 
     let (mut sender, mut receiver) = socket.split();
 
-    if read_join_message(&mut receiver).await.is_err() {
+    let joined = read_join_message(&mut receiver).await;
+
+    if joined.is_err() {
+        warn!("SERVER WS REJECTED: expected initial join message");
         let _ = sender.close().await;
         return;
     }
+
+    // Allocate identity and subscribe to server event fanout.
+    let id = Uuid::new_v4();
+    let short_id = id.to_string().chars().take(6).collect::<String>();
+    let name = format!("Player-{short_id}");
+    let mut event_rx = state.event_tx.subscribe();
+
+    info!(client_id = %id, client_name = %name, "SERVER WS SESSION STARTED");
+
+    // Register this player in the authoritative game loop.
+    if state
+        .game_tx
+        .send(GameCommand::PlayerJoined {
+            id,
+            name: name.clone(),
+        })
+        .await
+        .is_err()
+    {
+        warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING JOIN");
+        let _ = sender.close().await;
+        return;
+    }
+
+    // Forward server events from the game loop to this websocket.
+    let writer_task = tokio::spawn(async move {
+        loop {
+            let event = match event_rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(client_id = %id, skipped, "SERVER WS EVENT LAGGED");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+
+            let message = match event {
+                ServerEvent::Broadcast(message) => message,
+                ServerEvent::Direct { to, message } => {
+                    if to != id {
+                        continue;
+                    }
+                    message
+                }
+            };
+
+            if send_message(&mut sender, &message).await.is_err() {
+                warn!(client_id = %id, "SERVER WS WRITE FAILED");
+                break;
+            }
+        }
+    });
+
+    // Parse incoming websocket text messages and enqueue game commands.
+    while let Some(result) = receiver.next().await {
+        let message = match result {
+            Ok(message) => message,
+            Err(_) => {
+                warn!(client_id = %id, "SERVER WS READ FAILED");
+                break;
+            }
+        };
+
+        match message {
+            Message::Text(text) => {
+                let parsed = serde_json::from_str::<ClientRequest>(&text);
+                let request = match parsed {
+                    Ok(request) => request,
+                    Err(error) => {
+                        warn!(client_id = %id, %error, raw = %text, "SERVER WS PARSE FAILED");
+                        continue;
+                    }
+                };
+
+                match request {
+                    ClientRequest::Input(input) => {
+                        if state
+                            .game_tx
+                            .send(GameCommand::PlayerInput {
+                                id,
+                                seq: input.seq,
+                                move_x: input.move_x,
+                                move_z: input.move_z,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING INPUT");
+                            break;
+                        }
+                    }
+                    ClientRequest::ClientLog(entry) => {
+                        let details = entry.details.unwrap_or(serde_json::Value::Null);
+                        info!(
+                            client_id = %id,
+                            scope = %entry.scope,
+                            event = %entry.event,
+                            client_time = %entry.client_time,
+                            details = %details,
+                            "REMOTE CLIENT LOG"
+                        );
+                    }
+                    ClientRequest::Join => {
+                        warn!(client_id = %id, "SERVER WS RECEIVED UNEXPECTED EXTRA JOIN");
+                    }
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // Notify game loop about disconnect and stop forwarding task.
+    let _ = context.game_tx.send(GameCommand::PlayerLeft { id }).await;
+    info!(client_id = %id, "SERVER WS SESSION ENDED");
+    writer_task.abort();
+}
+
+/// Reads and validates the first client packet as a join request.
+async fn read_join_message(
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Result<(), ()> {
+    loop {
+        let Some(result) = receiver.next().await else {
+            return Err(());
+        };
+
+        let message = result.map_err(|_| ())?;
+        let Message::Text(text) = message else {
+            return Err(());
+        };
+
+        let request = serde_json::from_str::<ClientRequest>(&text).map_err(|_| ())?;
+        match request {
+            ClientRequest::Join => return Ok(()),
+            ClientRequest::ClientLog(entry) => {
+                // Accept pre-join debug traffic so visibility logs cannot break the handshake.
+                let details = entry.details.unwrap_or(serde_json::Value::Null);
+                info!(
+                    scope = %entry.scope,
+                    event = %entry.event,
+                    client_time = %entry.client_time,
+                    details = %details,
+                    "REMOTE CLIENT LOG (PRE-JOIN)"
+                );
+            }
+            ClientRequest::Input(_) => return Err(()),
+        }
+    }
+}
+
+/// Serializes and sends one server message to a websocket sink.
+async fn send_message(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &ServerResponse,
+) -> Result<(), axum::Error> {
+    let payload = serde_json::to_string(message).expect("server response must serialize");
+    sender.send(Message::Text(payload.into())).await
 }
