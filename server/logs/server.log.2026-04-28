@@ -1,0 +1,9 @@
+[2m2026-04-28T04:08:53.302863Z[0m [32m INFO[0m server listening [3maddr[0m[2m=[0m127.0.0.1:3000
+[2m2026-04-28T04:08:53.812056Z[0m [32m INFO[0m SERVER WS SESSION STARTED [3mclient_id[0m[2m=[0m65f3cbb0-a13c-44ba-8505-5d255cb3f8d2 [3mclient_name[0m[2m=[0mPlayer-65f3cb
+[2m2026-04-28T04:08:53.812294Z[0m [32m INFO[0m SERVER STATE TRANSITION: player joined [3mplayer_id[0m[2m=[0m65f3cbb0-a13c-44ba-8505-5d255cb3f8d2 [3mplayer_name[0m[2m=[0mPlayer-65f3cb [3mcolor[0m[2m=[0m#ef4444 [3mplayer_count[0m[2m=[0m1
+[2m2026-04-28T04:08:57.590181Z[0m [32m INFO[0m SERVER WS SESSION STARTED [3mclient_id[0m[2m=[0m460c17e1-586d-480e-b66e-8e1325668c00 [3mclient_name[0m[2m=[0mPlayer-460c17
+[2m2026-04-28T04:08:57.590399Z[0m [32m INFO[0m SERVER STATE TRANSITION: player joined [3mplayer_id[0m[2m=[0m460c17e1-586d-480e-b66e-8e1325668c00 [3mplayer_name[0m[2m=[0mPlayer-460c17 [3mcolor[0m[2m=[0m#f97316 [3mplayer_count[0m[2m=[0m2
+[2m2026-04-28T04:09:11.215997Z[0m [32m INFO[0m SERVER WS SESSION ENDED [3mclient_id[0m[2m=[0m460c17e1-586d-480e-b66e-8e1325668c00
+[2m2026-04-28T04:09:11.216254Z[0m [32m INFO[0m SERVER STATE TRANSITION: player left [3mplayer_id[0m[2m=[0m460c17e1-586d-480e-b66e-8e1325668c00 [3mplayer_count[0m[2m=[0m1
+[2m2026-04-28T04:09:11.934454Z[0m [32m INFO[0m SERVER WS SESSION ENDED [3mclient_id[0m[2m=[0m65f3cbb0-a13c-44ba-8505-5d255cb3f8d2
+[2m2026-04-28T04:09:11.934696Z[0m [32m INFO[0m SERVER STATE TRANSITION: player left [3mplayer_id[0m[2m=[0m65f3cbb0-a13c-44ba-8505-5d255cb3f8d2 [3mplayer_count[0m[2m=[0m0
