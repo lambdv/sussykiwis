@@ -68,7 +68,7 @@ pub mod request_handlers {
     ) -> Result<ServerResponse, ()> {
         match req {
             ClientRequest::Join => handle_join_request(state).await,
-            // ClientRequest::UpdatePosition(pos) => Err(()),
+            ClientRequest::Input(_) => todo!(),
         }
     }
 

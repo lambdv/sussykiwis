@@ -1,44 +1,58 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use uuid::Uuid;
 
-use axum::{
-    extract::{
-        State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
-    response::Response,
-};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
-use tokio::{
-    sync::{
-        Mutex,
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    },
-    time::{Duration, sleep},
-};
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
-    pub lobbies: HashMap<i32, LobbyState>,
+    pub game_tx: mpsc::Sender<GameCommand>,
+    pub event_tx: broadcast::Sender<ServerEvent>,
+    pub lobbies: HashMap<i32, Arc<Mutex<Lobby>>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(
+        game_tx: mpsc::Sender<GameCommand>,
+        event_tx: broadcast::Sender<ServerEvent>,
+    ) -> Self {
+        let mut lobbies = HashMap::new();
+        let lobby = Arc::new(Mutex::new(Lobby::new()));
+        lobbies.insert(0, lobby);
         Self {
-            lobbies: HashMap::new(),
+            game_tx,
+            event_tx,
+            lobbies,
         }
     }
 }
 
-type LobbyState = Arc<Mutex<Lobby>>;
+#[derive(Clone, Debug)]
+pub enum GameCommand {
+    PlayerInput(ServerInput),
+}
 
 #[derive(Clone, Debug)]
+pub struct ServerInput {
+    pub player_id: Uuid,
+    pub move_x: f32,
+    pub move_y: f32,
+}
 
+#[derive(Clone, Debug)]
+pub enum ServerEvent {
+    PlayerJoined(Player),
+    PlayerLeft(Uuid),
+    WorldSnapshot(WorldSnapshot),
+}
+
+#[derive(Clone, Debug)]
+pub struct WorldSnapshot {
+    pub server_time: u64,
+    pub players: Vec<Player>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Lobby {
     pub players: Vec<Player>,
     pub state: GameState,
