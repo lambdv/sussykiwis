@@ -4,9 +4,15 @@ type MessageHandler = (msg: ServerMessage) => void;
 
 export class NetworkClient {
   private connection: WebSocket | null = null;
-  readonly url = "ws://localhost:3000/ws";
   private connectPromise: Promise<void> | null = null;
   private messageHandlers = new Set<MessageHandler>();
+
+  private getUrl(): string {
+    // Connect back to the Rust server using the current page host.
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.hostname || "localhost";
+    return `${protocol}://${host}:8080/ws`;
+  }
 
   async connect(): Promise<void> {
     // Reuse an active socket immediately to avoid duplicate connections.
@@ -19,7 +25,7 @@ export class NetworkClient {
 
     // Open websocket and resolve once the connection is accepted.
     this.connectPromise = new Promise<void>((res, rej) => {
-      this.connection = new WebSocket(this.url);
+      this.connection = new WebSocket(this.getUrl());
 
       this.connection.onopen = () => {
         this.connectPromise = null;

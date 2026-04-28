@@ -1,20 +1,28 @@
 import nipplejs from "nipplejs";
 import {
-  ArcRotateCamera,
+    ArcRotateCamera,
   Color3,
   Color4,
   Engine,
   HemisphericLight,
   MeshBuilder,
   Scene,
-  StandardMaterial,
-  Vector3,
-  WebGPUEngine,
+    StandardMaterial,
+    Vector3,
+    WebGPUEngine,
 } from "@babylonjs/core";
+import { NetworkClient } from "../../networking/client";
+import type {
+  ServerMessage,
+  SnapshotPlayer,
+  WorldSnapshot,
+} from "../../networking/message";
 
 export function createGameScene(
   engine: Engine | WebGPUEngine,
   canvas: HTMLCanvasElement,
+  network: NetworkClient,
+  localPlayerId: string | null,
 ): Scene {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
@@ -40,27 +48,89 @@ export function createGameScene(
   );
   ground.position.y = -0.5;
 
-  const player = MeshBuilder.CreateSphere("sphere", { diameter: 2 }, scene);
-  const playerMat = new StandardMaterial("playerMat", scene);
-  playerMat.diffuseColor = Color3.FromHexString("#ebb0ff");
-  player.material = playerMat;
-  player.position.y = 2;
+  // Keep one mesh per player id so snapshots can update a shared world.
+  const players = new Map<string, ReturnType<typeof MeshBuilder.CreateSphere>>();
 
-  const disposeControls = setupPlayerController(scene, engine, player);
+  // Apply every server snapshot to the local Babylon scene.
+  const offMessage = network.onMessage((message: ServerMessage) => {
+    const snapshot = readWorldSnapshot(message);
+    if (!snapshot) return;
+
+    const liveIds = new Set<string>();
+    for (const snapshotPlayer of snapshot.players) {
+      liveIds.add(snapshotPlayer.id);
+      const mesh = upsertPlayerMesh(scene, players, snapshotPlayer);
+
+      mesh.position.x = snapshotPlayer.x;
+      mesh.position.z = snapshotPlayer.z;
+
+      // Follow the local player from authoritative state.
+      if (snapshotPlayer.id === localPlayerId) {
+        camera.position.set(mesh.position.x, 18, mesh.position.z - 18);
+        camera.setTarget(mesh.position);
+      }
+    }
+
+    // Remove meshes for players no longer present in the latest snapshot.
+    for (const [id, mesh] of players) {
+      if (liveIds.has(id)) continue;
+      mesh.dispose();
+      players.delete(id);
+    }
+  });
+
+  const disposeControls = setupPlayerController(scene, engine, network);
   scene.onDisposeObservable.add(disposeControls);
+  scene.onDisposeObservable.add(() => {
+    offMessage();
+    for (const mesh of players.values()) {
+      mesh.dispose();
+    }
+    players.clear();
+  });
 
   return scene;
 }
 
+function upsertPlayerMesh(
+  scene: Scene,
+  players: Map<string, ReturnType<typeof MeshBuilder.CreateSphere>>,
+  snapshotPlayer: SnapshotPlayer,
+) {
+  // Reuse existing meshes and lazily create new ones for newly seen players.
+  let mesh = players.get(snapshotPlayer.id);
+  if (mesh) {
+    return mesh;
+  }
+
+  mesh = MeshBuilder.CreateSphere(`player-${snapshotPlayer.id}`, { diameter: 2 }, scene);
+  mesh.position.y = 2;
+
+  const material = new StandardMaterial(`player-mat-${snapshotPlayer.id}`, scene);
+  material.diffuseColor = Color3.FromHexString(snapshotPlayer.color);
+  mesh.material = material;
+
+  players.set(snapshotPlayer.id, mesh);
+  return mesh;
+}
+
+function readWorldSnapshot(message: ServerMessage): WorldSnapshot | null {
+  // Narrow the server message union to the snapshot payload shape.
+  if (!("WorldSnapshot" in message)) {
+    return null;
+  }
+
+  return message.WorldSnapshot as WorldSnapshot;
+}
+
 function setupPlayerController(
   scene: Scene,
-  engine: Engine | WebGPUEngine,
-  player: ReturnType<typeof MeshBuilder.CreateSphere>,
+  _engine: Engine | WebGPUEngine,
+  network: NetworkClient,
 ): () => void {
   const keys = new Set<string>();
   const joy = { x: 0, y: 0 };
-  const speed = 10;
-  const cam = scene.activeCamera as ArcRotateCamera;
+  let seq = 0;
 
   const onKeyDown = (e: KeyboardEvent) => keys.add(e.key);
   const onKeyUp = (e: KeyboardEvent) => keys.delete(e.key);
@@ -197,16 +267,19 @@ function setupPlayerController(
   joyZone?.addEventListener("touchcancel", onTouchEnd, { passive: false });
 
   const ob = scene.onBeforeRenderObservable.add(() => {
-    const dt = engine.getDeltaTime() / 1000;
     const kx = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
     const kz = (keys.has("ArrowUp") ? 1 : 0) - (keys.has("ArrowDown") ? 1 : 0);
-    // Combine and clamp per-axis to [-1, 1] so diagonal stays fast but doesn't exceed speed.
+    // Send one normalized movement input per frame to the authoritative server.
     const ix = Math.max(-1, Math.min(1, kx + joy.x));
     const iz = Math.max(-1, Math.min(1, kz + joy.y));
-    player.position.x += ix * speed * dt;
-    player.position.z += iz * speed * dt;
-    cam.position.set(player.position.x, 18, player.position.z - 18);
-    cam.setTarget(player.position);
+    network.sendMessage({
+      Input: {
+        seq,
+        move_x: ix,
+        move_y: iz,
+      },
+    });
+    seq += 1;
   });
 
   return () => {

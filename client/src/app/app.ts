@@ -2,6 +2,7 @@ import { Engine, Scene, WebGPUEngine } from "@babylonjs/core";
 import { createMenuScene } from "../game/scenes/mainMenuScene";
 import { createGameScene } from "../game/scenes/gameScene";
 import { NetworkClient } from "../networking/client";
+import type { ServerMessage, WelcomeMessage } from "../networking/message";
 import { createQueueScene } from "../game/scenes/queueScene";
 
 export type AppState = "menu" | "queue" | "game";
@@ -35,6 +36,7 @@ export class Router {
   // Track the current route and transition token for async safety.
   private state: AppState = "menu";
   private transitionToken = 0;
+  private localPlayerId: string | null = null;
 
   constructor(
     private engine: Engine | WebGPUEngine,
@@ -66,7 +68,12 @@ export class Router {
         break;
 
       case "game":
-        this.currentScene = createGameScene(this.engine, this.canvas);
+        this.currentScene = createGameScene(
+          this.engine,
+          this.canvas,
+          this.network,
+          this.localPlayerId,
+        );
         break;
     }
   }
@@ -80,7 +87,7 @@ export class Router {
       if (token !== this.transitionToken || this.state !== "queue") return;
 
       // Send the server join request and immediately continue to game.
-      this.network.sendMessage({ type: "join" });
+      this.localPlayerId = await this.waitForWelcome(token);
       this.goTo("game");
     } catch (error) {
       // On handshake failure, return user to menu safely.
@@ -91,8 +98,41 @@ export class Router {
     }
   }
 
+  private waitForWelcome(token: number): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      // Attach a temporary listener so we can wait for the server identity.
+      const offMessage = this.network.onMessage((message: ServerMessage) => {
+        const welcome = readWelcomeMessage(message);
+        if (!welcome) return;
+        offMessage();
+        resolve(welcome.id);
+      });
+
+      // Stop waiting if the route changed before the join completed.
+      if (token !== this.transitionToken || this.state !== "queue") {
+        offMessage();
+        reject(new Error("Join cancelled"));
+        return;
+      }
+
+      if (!this.network.sendMessage("Join")) {
+        offMessage();
+        reject(new Error("Failed to send join message"));
+      }
+    });
+  }
+
   render() {
     // Draw the active scene if one exists.
     this.currentScene?.render();
   }
+}
+
+function readWelcomeMessage(message: ServerMessage): WelcomeMessage | null {
+  // Narrow the server message union to the welcome payload shape.
+  if (!("Welcome" in message)) {
+    return null;
+  }
+
+  return message.Welcome as WelcomeMessage;
 }

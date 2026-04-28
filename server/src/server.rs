@@ -17,10 +17,12 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 use tower_http::trace::TraceLayer;
 
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use crate::lobby::simulation::start_simulation;
+use crate::lobby::networking::model::{ClientRequest, ServerResponse};
 use crate::{GameCommand, ServerEvent};
 
 // server configuration
@@ -44,10 +46,10 @@ pub async fn start_server(config: Config) -> Result<(), Box<dyn std::error::Erro
     info!(%addr, "server listening");
 
     // tokio sync channels for communicating with the game loop task
-    let (game_tx, _game_rx) = mpsc::channel::<GameCommand>(100);
+    let (game_tx, game_rx) = mpsc::channel::<GameCommand>(100);
     let (event_tx, _event_rx) = broadcast::channel::<ServerEvent>(100);
 
-    let state = ServerContext::new(game_tx, event_tx);
+    let state = ServerContext::new(game_tx, event_tx.clone());
     // start the game loop in a separate task, it will receive client commands and produce server events for the ws sessions
 
     tokio::spawn(start_simulation(game_rx, event_tx.clone()));
@@ -130,13 +132,13 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
     let id = Uuid::new_v4();
     let short_id = id.to_string().chars().take(6).collect::<String>();
     let name = format!("Player-{short_id}");
-    let mut event_rx = state.event_tx.subscribe();
+    let mut event_rx = context.event_tx.subscribe();
 
     info!(client_id = %id, client_name = %name, "SERVER WS SESSION STARTED");
 
     // Register this player in the authoritative game loop.
-    if state
-        .game_tx
+    if context
+        .command_tx
         .send(GameCommand::PlayerJoined {
             id,
             name: name.clone(),
@@ -201,13 +203,13 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
 
                 match request {
                     ClientRequest::Input(input) => {
-                        if state
-                            .game_tx
+                        if context
+                            .command_tx
                             .send(GameCommand::PlayerInput {
                                 id,
                                 seq: input.seq,
                                 move_x: input.move_x,
-                                move_z: input.move_z,
+                                move_z: input.move_y,
                             })
                             .await
                             .is_err()
@@ -238,7 +240,7 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
     }
 
     // Notify game loop about disconnect and stop forwarding task.
-    let _ = context.game_tx.send(GameCommand::PlayerLeft { id }).await;
+    let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
     info!(client_id = %id, "SERVER WS SESSION ENDED");
     writer_task.abort();
 }

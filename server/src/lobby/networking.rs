@@ -8,6 +8,7 @@
 
 pub mod model {
     use serde::{Deserialize, Serialize};
+    use serde_json::Value;
     use uuid::Uuid;
 
     /// Represents different request types a client may send.
@@ -16,6 +17,7 @@ pub mod model {
         /// Join request (e.g., join a lobby or server)
         Join,
         Input(InputMessage),
+        ClientLog(ClientLogEntry),
     }
 
     /// Enum for server responses to the client.
@@ -30,6 +32,15 @@ pub mod model {
         pub seq: u32,
         pub move_x: f32,
         pub move_y: f32,
+    }
+
+    /// Carries client-side diagnostics without affecting gameplay state.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ClientLogEntry {
+        pub scope: String,
+        pub event: String,
+        pub client_time: String,
+        pub details: Option<Value>,
     }
 
     /// Represents one game-loop event routed to websocket sessions.
@@ -48,7 +59,7 @@ pub mod model {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct WorldSnapshot {
         pub server_time: u64,
-        pub players: Vec<PlayerSnapshot>,
+        pub players: Vec<SnapshotPlayer>,
     }
     /// Represents one player entry in the world snapshot payload.
     #[derive(Debug, Clone, Serialize, Deserialize)]
