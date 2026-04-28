@@ -8,10 +8,14 @@ export class NetworkClient {
   private messageHandlers = new Set<MessageHandler>();
 
   private getUrl(): string {
-    // Connect back to the Rust server using the current page host.
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const host = window.location.hostname || "localhost";
-    return `${protocol}://${host}:8080/ws`;
+    // Read HTTP server base URI from env and default locally if missing.
+    const env = (import.meta as { env?: Record<string, string> }).env;
+    const serverUri = env?.SERVER_URI ?? "http://localhost:10000/";
+
+    // Convert HTTP(S) URI to WS(S) endpoint and point to `/ws`.
+    const base = new URL(serverUri);
+    const wsProtocol = base.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${base.host}/ws`;
   }
 
   async connect(): Promise<void> {
