@@ -54,6 +54,8 @@ pub mod model {
     pub struct WelcomeMessage {
         pub id: Uuid,
         pub name: String,
+        pub tick_rate: u32,
+        pub move_speed: f32,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

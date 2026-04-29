@@ -108,6 +108,8 @@ impl World {
                     message: ServerResponse::Welcome(WelcomeMessage {
                         id,
                         name,
+                        tick_rate: self.tick_rate,
+                        move_speed: self.move_speed,
                     }),
                 });
             }
