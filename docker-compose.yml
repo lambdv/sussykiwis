@@ -1,0 +1,8 @@
+services:
+  kiwi:
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      # Internal port used by the Rust server (nginx proxies to it).
+      - PORT=3000

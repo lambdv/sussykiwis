@@ -9,14 +9,22 @@ beforeAll(async () => {
 });
 
 async function checkServer(): Promise<boolean> {
-  return await fetch("http://localhost:3000/health").then((res) => res.ok);
+  // Allow overriding base URL so docker/nginx `/api` setups can be tested.
+  const base = process.env.SERVER_URI ?? process.env.VITE_SERVER_URI ?? "http://localhost:3000";
+  try {
+    return await fetch(`${base.replace(/\/+$/, "")}/health`).then((res) => res.ok);
+  } catch {
+    return false;
+  }
 }
 
 describe("hello world", () => {
   itIfServer(
     "should perform an action only if the server is running",
     async () => {
-      const res = await fetch("http://localhost:3000/ping");
+      const base =
+        process.env.SERVER_URI ?? process.env.VITE_SERVER_URI ?? "http://localhost:3000";
+      const res = await fetch(`${base.replace(/\/+$/, "")}/ping`);
       const data = await res.json();
       expect(data.message).toEqual("pong");
       expect(res.status).toEqual(200);
@@ -24,7 +32,8 @@ describe("hello world", () => {
   );
 
   itIfServer("test isn't failing", async () => {
-    const res = await fetch("http://localhost:3000/ping");
+    const base = process.env.SERVER_URI ?? process.env.VITE_SERVER_URI ?? "http://localhost:3000";
+    const res = await fetch(`${base.replace(/\/+$/, "")}/ping`);
     const data = await res.json();
     expect(data.message).toEqual("pong");
     expect(res.status).not.toEqual(400);

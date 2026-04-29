@@ -9,13 +9,20 @@ export class NetworkClient {
 
   private getUrl(): string {
     // Read HTTP server base URI from env and default locally if missing.
+    // Vite only exposes `VITE_*` variables to client bundles.
     const env = (import.meta as { env?: Record<string, string> }).env;
-    const serverUri = env?.SERVER_URI ?? "http://localhost:10000/";
+    // Prefer the Vite-exposed name, but keep a fallback for older local `.env` files.
+    const serverUri =
+      env?.VITE_SERVER_URI ?? env?.SERVER_URI ?? "http://localhost:10000/";
 
     // Convert HTTP(S) URI to WS(S) endpoint and point to `/ws`.
     const base = new URL(serverUri);
     const wsProtocol = base.protocol === "https:" ? "wss:" : "ws:";
-    return `${wsProtocol}//${base.host}/ws`;
+
+    // If a base path is provided (eg. `/api/`), preserve it.
+    // This lets nginx serve the client at `/` and proxy the server at `/api`.
+    const basePath = base.pathname.replace(/\/+$/, "");
+    return `${wsProtocol}//${base.host}${basePath}/ws`;
   }
 
   async connect(): Promise<void> {

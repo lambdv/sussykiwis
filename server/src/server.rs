@@ -27,6 +27,7 @@ use crate::{GameCommand, ServerEvent};
 
 // server configuration
 pub struct Config {
+    pub host: String,
     pub port: u16,
     pub tick_rate: u32,
 }
@@ -40,7 +41,7 @@ pub async fn start_server(config: Config) -> Result<(), Box<dyn std::error::Erro
         .with_target(false)
         .init();
 
-    let addr = format!("127.0.0.1:{}", config.port);
+    let addr = format!("{}:{}", config.host, config.port);
 
     let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
     info!(%addr, "server listening");
