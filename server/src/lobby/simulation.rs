@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::lobby::networking::model::{
-    ActiveSabotage, Faction, GamePhase, MeetingSnapshot, PlayerRole, PlayerState,
+    ActiveSabotage, Faction, GamePhase, GameSubState, MeetingSnapshot, PlayerRole, PlayerState,
     SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody, SnapshotPlayer,
     WinMessage, WorldSnapshot,
 };
@@ -155,8 +155,8 @@ impl World {
     pub fn tick(&mut self) {
         self.tick += 1;
 
-        // Only the playing phase allows movement.
-        if matches!(self.phase, GamePhase::Playing) {
+        // Allow movement in pre-match lobby and active gameplay phases.
+        if matches!(self.phase, GamePhase::Lobby | GamePhase::Playing) {
             let dt = 1.0 / self.tick_rate as f32;
 
             // Integrate the latest input for movable player states.
@@ -286,7 +286,7 @@ impl World {
         player.last_seq = seq;
 
         // Meeting, ejection, and win phases freeze movement without dropping ack state.
-        if !matches!(self.phase, GamePhase::Playing)
+        if !matches!(self.phase, GamePhase::Lobby | GamePhase::Playing)
             || !matches!(player.state, PlayerState::Alive | PlayerState::Ghost)
         {
             player.move_x = 0.0;
@@ -478,6 +478,11 @@ impl World {
                 tick: self.tick,
                 server_time: self.tick * 1000 / self.tick_rate as u64,
                 phase: self.phase,
+                // Tell clients whether this snapshot is still pre-match or already in-match.
+                sub_state: self.current_sub_state(),
+                // Send player progress so pre-match UI can show waiting status.
+                joined_players: self.players.len(),
+                expected_players: MIN_PLAYERS,
                 players: self
                     .players
                     .values()
@@ -515,6 +520,15 @@ impl World {
         };
 
         let _ = self.event_tx.send(ServerEvent::Broadcast(payload));
+    }
+
+    fn current_sub_state(&self) -> GameSubState {
+        // Keep lobby snapshots marked until the simulation enters the first live round.
+        if matches!(self.phase, GamePhase::Lobby) {
+            GameSubState::Lobby
+        } else {
+            GameSubState::InGame
+        }
     }
 
     fn try_start_match(&mut self) {

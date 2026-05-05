@@ -1,6 +1,7 @@
 import nipplejs from "nipplejs";
 import {
   ArcRotateCamera,
+  Camera,
   Color3,
   Color4,
   Engine,
@@ -126,7 +127,7 @@ export async function createGameScene(
 }
 
 function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
-  // Lock the gameplay view into a fixed isometric follow angle.
+  // Lock the gameplay view into a fixed orthographic isometric angle.
   const camera = new ArcRotateCamera(
     "camera",
     -Math.PI / 4,
@@ -137,6 +138,20 @@ function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
   );
   camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
   camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
+  camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+  scene.onBeforeRenderObservable.add(() => {
+    // Keep ortho bounds responsive so zoom stays consistent on resize.
+    const engine = scene.getEngine();
+    const width = Math.max(1, engine.getRenderWidth());
+    const height = Math.max(1, engine.getRenderHeight());
+    const aspect = width / height;
+    const halfHeight = 28;
+    const halfWidth = halfHeight * aspect;
+    camera.orthoLeft = -halfWidth;
+    camera.orthoRight = halfWidth;
+    camera.orthoBottom = -halfHeight;
+    camera.orthoTop = halfHeight;
+  });
   camera.attachControl(canvas, true);
   camera.inputs.clear();
   return camera;

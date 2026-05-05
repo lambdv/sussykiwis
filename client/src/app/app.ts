@@ -1,11 +1,12 @@
 import { Engine, Scene, WebGPUEngine } from "@babylonjs/core";
 import { createMenuScene } from "../game/scenes/mainMenuScene";
 import { createGameScene } from "../game/scenes/gameScene";
+import { createPreMatchScene } from "../game/scenes/preMatchScene";
 import { NetworkClient } from "../networking/client";
 import type { PlayerRole, ServerMessage, WelcomeMessage } from "../networking/message";
 import { createQueueScene } from "../game/scenes/queueScene";
 
-export type AppState = "menu" | "queue" | "game";
+export type AppState = "menu" | "queue" | "preMatch" | "game";
 
 export class App {
   private router: Router;
@@ -75,6 +76,23 @@ export class Router {
         });
         break;
 
+      case "preMatch":
+        this.currentScene = await createPreMatchScene(
+          this.engine,
+          this.canvas,
+          this.network,
+          this.localPlayerId,
+          {
+            onMatchReady: () => {
+              // Enter the gameplay scene once server marks sub-state as in-game.
+              if (this.state === "preMatch") {
+                void this.goTo("game");
+              }
+            },
+          },
+        );
+        break;
+
       case "game":
         this.currentScene = await createGameScene(
           this.engine,
@@ -95,9 +113,9 @@ export class Router {
       // If route changed while connecting, stop this stale transition.
       if (token !== this.transitionToken || this.state !== "queue") return;
 
-      // Send the server join request and immediately continue to game.
+      // Send join request and continue into pre-match waiting world.
       this.localPlayerId = await this.waitForWelcome(token);
-      await this.goTo("game");
+      await this.goTo("preMatch");
     } catch (error) {
       // On handshake failure, return user to menu safely.
       console.error("Failed to join game:", error);

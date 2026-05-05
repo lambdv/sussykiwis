@@ -1,5 +1,7 @@
 export type GamePhase = "lobby" | "playing" | "meeting" | "ejection" | "win";
 
+export type GameSubState = "lobby" | "in_game";
+
 export type PlayerRole = "crewmate" | "imposter" | "sheriff";
 
 export type PlayerState = "alive" | "dead" | "ghost" | "ejected";
@@ -75,6 +77,9 @@ export type WorldSnapshot = {
   tick: number;
   serverTime: number;
   phase: GamePhase;
+  subState: GameSubState;
+  joinedPlayers: number;
+  expectedPlayers: number;
   players: SnapshotPlayer[];
   deadBodies: SnapshotDeadBody[];
   activeSabotages: ActiveSabotage[];

@@ -107,6 +107,13 @@ pub mod model {
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
+    pub enum GameSubState {
+        Lobby,
+        InGame,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
     pub enum PlayerRole {
         Crewmate,
         Imposter,
@@ -142,6 +149,9 @@ pub mod model {
         pub tick: u64,
         pub server_time: u64,
         pub phase: GamePhase,
+        pub sub_state: GameSubState,
+        pub joined_players: usize,
+        pub expected_players: usize,
         pub players: Vec<SnapshotPlayer>,
         pub dead_bodies: Vec<SnapshotDeadBody>,
         pub active_sabotages: Vec<ActiveSabotage>,
