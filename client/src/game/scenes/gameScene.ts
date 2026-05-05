@@ -126,14 +126,17 @@ export async function createGameScene(
 }
 
 function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
+  // Lock the gameplay view into a fixed isometric follow angle.
   const camera = new ArcRotateCamera(
     "camera",
-    Math.PI / 4,
-    Math.PI / 3,
-    50,
+    -Math.PI / 4,
+    0.95,
+    52,
     Vector3.Zero(),
     scene,
   );
+  camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
+  camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
   camera.attachControl(canvas, true);
   camera.inputs.clear();
   return camera;
@@ -256,7 +259,7 @@ function handleLocalPlayerMovement(
   }
 
   if (localState) {
-    camera.position.set(localState.mesh.position.x, 18, localState.mesh.position.z - 18);
+    // Keep the camera centered on the local player without changing the angle.
     camera.setTarget(localState.mesh.position);
   }
 
