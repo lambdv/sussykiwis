@@ -15,9 +15,9 @@ export class App {
     this.router = new Router(engine, canvas);
   }
 
-  start() {
+  async start() {
     // Start the app at the main menu scene.
-    this.router.goTo("menu");
+    await this.router.goTo("menu");
   }
 
   tick() {
@@ -43,7 +43,7 @@ export class Router {
     private canvas: HTMLCanvasElement,
   ) {}
 
-  goTo(key: AppState) {
+  async goTo(key: AppState): Promise<void> {
     // Bump the token so stale async work from prior routes is ignored.
     this.transitionToken += 1;
     this.state = key;
@@ -68,7 +68,7 @@ export class Router {
         break;
 
       case "game":
-        this.currentScene = createGameScene(
+        this.currentScene = await createGameScene(
           this.engine,
           this.canvas,
           this.network,
@@ -88,7 +88,7 @@ export class Router {
 
       // Send the server join request and immediately continue to game.
       this.localPlayerId = await this.waitForWelcome(token);
-      this.goTo("game");
+      await this.goTo("game");
     } catch (error) {
       // On handshake failure, return user to menu safely.
       console.error("Failed to join game:", error);

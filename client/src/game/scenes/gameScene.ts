@@ -5,12 +5,15 @@ import {
   Color4,
   Engine,
   HemisphericLight,
+  Mesh,
   MeshBuilder,
   Scene,
+  SceneLoader,
   StandardMaterial,
   Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
+import "@babylonjs/loaders";
 import { NetworkClient } from "../../networking/client";
 import type {
   ServerMessage,
@@ -23,7 +26,7 @@ const MOVE_SPEED = 6.0;
 type RemoteSnapshot = { time: number; x: number; z: number };
 
 type PlayerState = {
-  mesh: ReturnType<typeof MeshBuilder.CreateSphere>;
+  mesh: Mesh;
   snapshots: RemoteSnapshot[];
 };
 
@@ -36,14 +39,17 @@ type GameState = {
 /**
  * This function initializes and returns a new Babylon.js Scene configured for the game. It sets up the scene's background color, creates a camera and environment, initializes data structures for players and game state, sets up network message handling and player input control, and starts the render loop. It also registers a cleanup handler that disposes of resources when the scene is disposed.
  */
-export function createGameScene(
+export async function createGameScene(
   engine: Engine | WebGPUEngine,
   canvas: HTMLCanvasElement,
   network: NetworkClient,
   localPlayerId: string | null,
-): Scene {
+): Promise<Scene> {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
+
+  const { meshes: kiwiMeshes } = await SceneLoader.ImportMeshAsync("", "/assets/objects/", "kiwi.obj", scene);
+  const baseKiwiMesh = kiwiMeshes[0] as Mesh;
 
   const camera = createCamera(scene, canvas);
   createEnvironment(scene);
@@ -55,7 +61,7 @@ export function createGameScene(
     pendingInputs: [],
   };
 
-  const offMessage = setupNetworkHandler(scene, network, players, localPlayerId, gameState);
+  const offMessage = setupNetworkHandler(scene, network, players, localPlayerId, gameState, baseKiwiMesh);
   const controller = setupPlayerController();
 
   const renderLoop = setupRenderLoop(
@@ -123,6 +129,7 @@ function setupNetworkHandler(
   players: Map<string, PlayerState>,
   localPlayerId: string | null,
   gameState: GameState,
+  baseKiwiMesh: Mesh,
 ) {
   return network.onMessage((message: ServerMessage) => {
     const snapshot = readWorldSnapshot(message);
@@ -133,7 +140,7 @@ function setupNetworkHandler(
 
     for (const snapshotPlayer of snapshot.players) {
       liveIds.add(snapshotPlayer.id);
-      const state = upsertPlayerMesh(scene, players, snapshotPlayer);
+      const state = upsertPlayerMesh(scene, players, snapshotPlayer, baseKiwiMesh);
 
       if (snapshotPlayer.id === localPlayerId) {
         reconcileLocalPlayer(state, snapshotPlayer, gameState.pendingInputs);
@@ -369,13 +376,14 @@ function upsertPlayerMesh(
   scene: Scene,
   players: Map<string, PlayerState>,
   snapshotPlayer: SnapshotPlayer,
+  baseKiwiMesh: Mesh,
 ): PlayerState {
   let playerState = players.get(snapshotPlayer.id);
   if (playerState) {
     return playerState;
   }
 
-  const mesh = MeshBuilder.CreateSphere(`player-${snapshotPlayer.id}`, { diameter: 2 }, scene);
+  const mesh = baseKiwiMesh.clone(`player-${snapshotPlayer.id}`);
   mesh.position.y = 2;
 
   const material = new StandardMaterial(`player-mat-${snapshotPlayer.id}`, scene);

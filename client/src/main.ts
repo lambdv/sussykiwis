@@ -28,7 +28,7 @@ async function bootstrap() {
   }
 
   const app = new App(engine, canvas);
-  app.start();
+  await app.start();
 
   engine.runRenderLoop(() => {
     app.tick();
