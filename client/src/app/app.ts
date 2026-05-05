@@ -2,7 +2,7 @@ import { Engine, Scene, WebGPUEngine } from "@babylonjs/core";
 import { createMenuScene } from "../game/scenes/mainMenuScene";
 import { createGameScene } from "../game/scenes/gameScene";
 import { NetworkClient } from "../networking/client";
-import type { ServerMessage, WelcomeMessage } from "../networking/message";
+import type { PlayerRole, ServerMessage, WelcomeMessage } from "../networking/message";
 import { createQueueScene } from "../game/scenes/queueScene";
 
 export type AppState = "menu" | "queue" | "game";
@@ -37,11 +37,19 @@ export class Router {
   private state: AppState = "menu";
   private transitionToken = 0;
   private localPlayerId: string | null = null;
+  private localRole: PlayerRole | null = null;
 
   constructor(
     private engine: Engine | WebGPUEngine,
     private canvas: HTMLCanvasElement,
-  ) {}
+  ) {
+    // Persist private session messages even when a scene-specific listener is not active.
+    this.network.onMessage((message) => {
+      if (message.type === "game_started") {
+        this.localRole = message.role;
+      }
+    });
+  }
 
   async goTo(key: AppState): Promise<void> {
     // Bump the token so stale async work from prior routes is ignored.
@@ -73,6 +81,7 @@ export class Router {
           this.canvas,
           this.network,
           this.localPlayerId,
+          this.localRole,
         );
         break;
     }
@@ -105,7 +114,7 @@ export class Router {
         const welcome = readWelcomeMessage(message);
         if (!welcome) return;
         offMessage();
-        resolve(welcome.id);
+        resolve(welcome.playerId);
       });
 
       // Stop waiting if the route changed before the join completed.
@@ -115,7 +124,7 @@ export class Router {
         return;
       }
 
-      if (!this.network.sendMessage("Join")) {
+      if (!this.network.sendMessage({ type: "join" })) {
         offMessage();
         reject(new Error("Failed to send join message"));
       }
@@ -130,9 +139,9 @@ export class Router {
 
 function readWelcomeMessage(message: ServerMessage): WelcomeMessage | null {
   // Narrow the server message union to the welcome payload shape.
-  if (!("Welcome" in message)) {
+  if (message.type !== "welcome") {
     return null;
   }
 
-  return message.Welcome as WelcomeMessage;
+  return message;
 }
