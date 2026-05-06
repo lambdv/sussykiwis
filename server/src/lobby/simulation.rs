@@ -129,6 +129,7 @@ pub struct World {
     dead_bodies: HashMap<Uuid, DeadBody>,
     active_sabotages: Vec<ActiveSabotage>,
     phase: GamePhase,
+    round_locked: bool,
     meeting: Option<MeetingState>,
     ejection: Option<EjectionState>,
     win: Option<WinMessage>,
@@ -147,6 +148,7 @@ impl World {
             dead_bodies: HashMap::new(),
             active_sabotages: Vec::new(),
             phase: GamePhase::Lobby,
+            round_locked: false,
             meeting: None,
             ejection: None,
             win: None,
@@ -210,15 +212,15 @@ impl World {
         }
     }
 
-    fn handle_join(&mut self, id: Uuid, name: String) {
-        let color = pick_player_color(self.players.len());
+    fn handle_join(&mut self, id: Uuid, _name: String) {
+        let (color_name, color) = pick_player_color(self.players.len());
         let (spawn_x, spawn_z) = pick_spawn_position(self.join_order.len());
 
         // Spawn the player into the lobby with no role until the match starts.
         let player = Player {
             id,
-            name: name.clone(),
-            color: color.clone(),
+            name: color_name.to_string(),
+            color: color.to_string(),
             x: spawn_x,
             z: spawn_z,
             move_x: 0.0,
@@ -234,7 +236,7 @@ impl World {
 
         info!(
             player_id = %id,
-            player_name = %name,
+            player_name = %color_name,
             color = %color,
             player_count = self.players.len(),
             "SERVER STATE TRANSITION: player joined"
@@ -244,13 +246,14 @@ impl World {
             to: id,
             message: ServerResponse::Welcome {
                 player_id: id,
-                name,
+                name: color_name.to_string(),
                 tick_rate: self.tick_rate,
                 move_speed: self.move_speed,
                 observer: false,
             },
         });
 
+        self.maybe_unlock_round();
         self.try_start_match();
     }
 
@@ -269,6 +272,7 @@ impl World {
             "SERVER STATE TRANSITION: player left"
         );
 
+        self.maybe_unlock_round();
         self.check_win_condition();
     }
 
@@ -388,7 +392,7 @@ impl World {
         }
 
         // Freeze the match into a meeting until votes resolve or the timer expires.
-        let ends_at_tick = self.tick + (self.tick_rate as u64 * 20);
+        let ends_at_tick = self.tick + (self.tick_rate as u64 * 120);
         self.phase = GamePhase::Meeting;
         self.meeting = Some(MeetingState {
             reported_body_id: body_id,
@@ -538,6 +542,7 @@ impl World {
                         id: player.id,
                         name: player.name.clone(),
                         color: player.color.clone(),
+                        role: player.role,
                         x: player.x,
                         z: player.z,
                         state: player.state,
@@ -582,7 +587,7 @@ impl World {
     }
 
     fn try_start_match(&mut self) {
-        if !matches!(self.phase, GamePhase::Lobby) || self.players.len() < MIN_PLAYERS {
+        if !matches!(self.phase, GamePhase::Lobby) || self.round_locked || self.players.len() < MIN_PLAYERS {
             return;
         }
 
@@ -731,9 +736,7 @@ impl World {
         self.ejection = None;
         self.check_win_condition();
 
-        if !matches!(self.phase, GamePhase::Win) {
-            self.phase = GamePhase::Playing;
-        }
+        self.phase = GamePhase::Playing;
     }
 
     fn expire_sabotages(&mut self) {
@@ -749,7 +752,7 @@ impl World {
     }
 
     fn check_win_condition(&mut self) {
-        if matches!(self.phase, GamePhase::Lobby | GamePhase::Win) {
+        if matches!(self.phase, GamePhase::Lobby) {
             return;
         }
 
@@ -783,7 +786,6 @@ impl World {
         };
 
         if let Some(win_message) = win {
-            self.phase = GamePhase::Win;
             self.meeting = None;
             self.ejection = None;
             self.win = Some(win_message.clone());
@@ -793,7 +795,108 @@ impl World {
                     winner: win_message.winner,
                     reason: win_message.reason,
                 }));
+            self.reset_to_lobby();
+            self.round_locked = true;
         }
+    }
+
+    fn reset_to_lobby(&mut self) {
+        // Clear the completed round so the next match can start from a clean lobby.
+        self.phase = GamePhase::Lobby;
+        self.meeting = None;
+        self.ejection = None;
+        self.win = None;
+        self.dead_bodies.clear();
+        self.active_sabotages.clear();
+
+        // Restore every connected player to a fresh lobby state.
+        for (index, player_id) in self.join_order.iter().copied().enumerate() {
+            if let Some(player) = self.players.get_mut(&player_id) {
+                let (spawn_x, spawn_z) = pick_spawn_position(index);
+                player.x = spawn_x;
+                player.z = spawn_z;
+                player.move_x = 0.0;
+                player.move_z = 0.0;
+                player.last_seq = 0;
+                player.role = PlayerRole::Crewmate;
+                player.state = PlayerState::Alive;
+                player.kill_cooldown_ends_at_tick = 0;
+            }
+        }
+    }
+
+    fn maybe_unlock_round(&mut self) {
+        // Allow a fresh round only after the lobby has dropped below the minimum size again.
+        if self.players.len() < MIN_PLAYERS {
+            self.round_locked = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn win_state_returns_to_lobby_without_restarting() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+
+        let player_id = Uuid::new_v4();
+        world.join_order.push(player_id);
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Player-1".to_string(),
+                color: "#fff".to_string(),
+                x: 10.0,
+                z: -4.0,
+                move_x: 1.0,
+                move_z: 1.0,
+                last_seq: 12,
+                role: PlayerRole::Imposter,
+                state: PlayerState::Ghost,
+                kill_cooldown_ends_at_tick: 99,
+            },
+        );
+        world.win = Some(WinMessage {
+            winner: Faction::Crew,
+            reason: "all_imposters_ejected".to_string(),
+        });
+        world.dead_bodies.insert(
+            Uuid::new_v4(),
+            DeadBody {
+                id: Uuid::new_v4(),
+                player_id,
+                x: 1.0,
+                z: 2.0,
+                reported: false,
+            },
+        );
+        world.active_sabotages.push(ActiveSabotage {
+            kind: SabotageKind::LightsOff,
+            started_at_tick: 0,
+            ends_at_tick: 10,
+        });
+
+        world.tick();
+
+        assert_eq!(world.phase, GamePhase::Lobby);
+        assert!(world.win.is_none());
+        assert!(world.meeting.is_none());
+        assert!(world.ejection.is_none());
+        assert!(world.dead_bodies.is_empty());
+        assert!(world.active_sabotages.is_empty());
+        assert!(world.round_locked);
+
+        let player = world.players.get(&player_id).expect("player still present");
+        assert_eq!(player.role, PlayerRole::Crewmate);
+        assert_eq!(player.state, PlayerState::Alive);
+        assert_eq!(player.move_x, 0.0);
+        assert_eq!(player.move_z, 0.0);
+        assert_eq!(player.last_seq, 0);
+        assert_eq!((player.x, player.z), pick_spawn_position(0));
     }
 }
 
@@ -803,10 +906,17 @@ fn distance_sq(ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
     (dx * dx) + (dz * dz)
 }
 
-fn pick_player_color(index: usize) -> String {
-    // Cycle through a fixed palette so clients can distinguish players.
-    const COLORS: [&str; 6] = ["#ebb0ff", "#8fd3ff", "#ffd37a", "#9cffb0", "#ff9aa2", "#c7b8ff"];
-    COLORS[index % COLORS.len()].to_string()
+fn pick_player_color(index: usize) -> (&'static str, &'static str) {
+    // Use named colors so the player label reads as a role-like color.
+    const COLORS: [(&str, &str); 6] = [
+        ("RED", "#ef4444"),
+        ("BLUE", "#3b82f6"),
+        ("GREEN", "#22c55e"),
+        ("YELLOW", "#eab308"),
+        ("PURPLE", "#a855f7"),
+        ("ORANGE", "#f97316"),
+    ];
+    COLORS[index % COLORS.len()]
 }
 
 fn pick_spawn_position(index: usize) -> (f32, f32) {

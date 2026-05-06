@@ -14,7 +14,9 @@ import {
   WebGPUEngine,
 } from "@babylonjs/core";
 import { NetworkClient } from "../../networking/client";
-import type { ServerMessage, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
+import type { PlayerRole, ServerMessage, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
+import { cameraRelativeMovement } from "../cameraMovement";
+import { createPlayerTag, type PlayerTagState } from "../playerTag";
 
 const MOVE_SPEED = 6.0;
 const MAP_HALF_EXTENT = 60;
@@ -24,6 +26,7 @@ type RemoteSnapshot = { time: number; x: number; z: number };
 type PlayerMeshState = {
   mesh: Mesh;
   material: StandardMaterial;
+  tag: PlayerTagState;
   snapshots: RemoteSnapshot[];
 };
 
@@ -34,7 +37,11 @@ type SessionState = {
   clientRenderTime: number;
   pendingInputs: PendingInput[];
   latestSnapshot: WorldSnapshot | null;
+  localPlayerId: string | null;
+  localRole: PlayerRole | null;
   notice: string;
+  countdownEndsAt: number | null;
+  countdownTimer: number | null;
 };
 
 type PreMatchHud = {
@@ -64,7 +71,11 @@ export async function createPreMatchScene(
     clientRenderTime: 0,
     pendingInputs: [],
     latestSnapshot: null,
+    localPlayerId,
+    localRole: null,
     notice: "Waiting for players",
+    countdownEndsAt: null,
+    countdownTimer: null,
   };
 
   const offMessage = network.onMessage((message) => {
@@ -75,9 +86,11 @@ export async function createPreMatchScene(
 
   const renderLoop = scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000.0;
+    // Keep movement responsive until the authoritative match scene takes over.
     handleLocalPlayerMovement(camera, players, controller, network, localPlayerId, session, dt);
     updateRenderTime(session, dt);
     interpolateRemotePlayers(players, localPlayerId, session.clientRenderTime);
+    updateCountdown(session);
     updatePreMatchHud(hud, session);
   });
 
@@ -86,6 +99,9 @@ export async function createPreMatchScene(
     controller.dispose();
     offMessage();
     scene.onBeforeRenderObservable.remove(renderLoop);
+    if (session.countdownTimer !== null) {
+      window.clearTimeout(session.countdownTimer);
+    }
     hud.root.remove();
     for (const player of players.values()) {
       player.mesh.dispose();
@@ -166,6 +182,12 @@ function handleServerMessage(
   session: SessionState,
   callbacks: { onMatchReady: () => void },
 ) {
+  if (message.type === "game_started") {
+    session.localRole = message.role;
+    session.notice = `Role assigned: ${formatRoleName(message.role)}`;
+    return;
+  }
+
   // Respond only to live world snapshots while in pre-match.
   if (message.type !== "world_snapshot") {
     return;
@@ -173,9 +195,18 @@ function handleServerMessage(
 
   handleSnapshot(scene, players, message.snapshot, localPlayerId, session);
 
-  // Promote the client into the main game scene once server flips sub-state.
+  // Switch scenes as soon as the authoritative server says the round is live.
   if (message.snapshot.subState === "in_game") {
+    cancelCountdown(session);
     callbacks.onMatchReady();
+    return;
+  }
+
+  // Start a short countdown once the lobby fills, then enter the match.
+  if (message.snapshot.joinedPlayers >= message.snapshot.expectedPlayers) {
+    startCountdown(session, callbacks);
+  } else {
+    cancelCountdown(session);
   }
 }
 
@@ -188,7 +219,18 @@ function handleSnapshot(
 ) {
   session.latestSnapshot = snapshot;
   session.latestServerTime = Math.max(session.latestServerTime, snapshot.serverTime);
-  session.notice = `Waiting for players: ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`;
+
+  if (!session.localRole && session.localPlayerId) {
+    const localPlayer = snapshot.players.find((player) => player.id === session.localPlayerId);
+    if (localPlayer) {
+      session.localRole = localPlayer.role;
+      session.notice = `Role assigned: ${formatRoleName(localPlayer.role)}`;
+    }
+  }
+
+  if (session.countdownEndsAt === null && !session.localRole) {
+    session.notice = `Waiting for players: ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`;
+  }
 
   const livePlayerIds = new Set<string>();
   for (const snapshotPlayer of snapshot.players) {
@@ -226,8 +268,9 @@ function handleLocalPlayerMovement(
 ) {
   // Apply local prediction in pre-match so movement feels responsive.
   const input = controller.getInput();
-  const ix = input.x;
-  const iz = input.z;
+  const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
+  const ix = movement.x;
+  const iz = movement.z;
   const localState = localPlayerId ? players.get(localPlayerId) : undefined;
 
   if (localPlayerId && localState) {
@@ -277,13 +320,10 @@ function reconcileLocalPlayer(state: PlayerMeshState, snapshotPlayer: SnapshotPl
   const dz = clampedZ - state.mesh.position.z;
   const distSq = dx * dx + dz * dz;
 
-  // Smooth tiny corrections but snap larger desyncs to remove visible jitter.
-  if (distSq > 9) {
+  // Snap the local player unless the correction is tiny, which avoids spawn jitter.
+  if (distSq > 0.1) {
     state.mesh.position.x = clampedX;
     state.mesh.position.z = clampedZ;
-  } else {
-    state.mesh.position.x += dx * 0.35;
-    state.mesh.position.z += dz * 0.35;
   }
 }
 
@@ -356,7 +396,10 @@ function upsertPlayerMesh(
   mesh.material = material;
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
 
-  const playerState = { mesh, material, snapshots: [] };
+  const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
+  tag.mesh.parent = mesh;
+
+  const playerState = { mesh, material, tag, snapshots: [] };
   players.set(snapshotPlayer.id, playerState);
   return playerState;
 }
@@ -367,6 +410,9 @@ function cleanupDisconnectedPlayers(players: Map<string, PlayerMeshState>, liveI
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
     state.material.dispose();
+    state.tag.mesh.dispose();
+    state.tag.material.dispose();
+    state.tag.texture.dispose();
     players.delete(id);
   }
 }
@@ -404,6 +450,50 @@ function updatePreMatchHud(hud: PreMatchHud, session: SessionState) {
   hud.status.textContent = session.notice;
 }
 
+function startCountdown(session: SessionState, _callbacks: { onMatchReady: () => void }) {
+  // Only start one countdown per full lobby.
+  if (session.countdownEndsAt !== null) return;
+
+  const durationMs = 5000;
+  session.countdownEndsAt = Date.now() + durationMs;
+  session.notice = "Match starting in 5";
+  session.countdownTimer = window.setTimeout(() => {
+    session.countdownTimer = null;
+    session.countdownEndsAt = null;
+    // Wait for the authoritative in-game snapshot instead of transitioning locally.
+    session.notice = "Waiting for server to start match";
+  }, durationMs);
+}
+
+function cancelCountdown(session: SessionState) {
+  // Stop the countdown if the lobby is no longer full.
+  if (session.countdownTimer !== null) {
+    window.clearTimeout(session.countdownTimer);
+    session.countdownTimer = null;
+  }
+
+  if (session.countdownEndsAt !== null) {
+    session.countdownEndsAt = null;
+    const snapshot = session.latestSnapshot;
+    session.notice = snapshot
+      ? `Waiting for players: ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`
+      : "Waiting for players";
+  }
+}
+
+function formatRoleName(role: PlayerRole) {
+  // Convert internal role ids into player-facing labels.
+  return role === "imposter" ? "Imposter" : role === "sheriff" ? "Sheriff" : "View Mate";
+}
+
+function updateCountdown(session: SessionState) {
+  // Refresh the displayed countdown every frame so it stays in sync.
+  if (session.countdownEndsAt === null) return;
+
+  const secondsLeft = Math.max(0, Math.ceil((session.countdownEndsAt - Date.now()) / 1000));
+  session.notice = `Match starting in ${secondsLeft}`;
+}
+
 function setupPlayerController() {
   // Merge keyboard and joystick movement into one normalized input vector.
   const keys = new Set<string>();
@@ -416,7 +506,10 @@ function setupPlayerController() {
   window.addEventListener("keyup", onKeyUp);
 
   const joyZone = document.getElementById("joystickZone") as HTMLDivElement | null;
-  if (joyZone) joyZone.classList.add("is-active");
+  if (joyZone) {
+    joyZone.innerHTML = "";
+    joyZone.classList.add("is-active");
+  }
   let activePointerId: number | null = null;
   let activeTouchId: number | null = null;
 

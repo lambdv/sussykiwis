@@ -117,7 +117,6 @@ pub mod model {
         Playing,
         Meeting,
         Ejection,
-        Win,
     }
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +180,7 @@ pub mod model {
         pub id: Uuid,
         pub name: String,
         pub color: String,
+        pub role: PlayerRole,
         pub x: f32,
         pub z: f32,
         pub state: PlayerState,

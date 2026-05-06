@@ -23,14 +23,26 @@ import type {
   SnapshotPlayer,
   WorldSnapshot,
 } from "../../networking/message";
+import { cameraRelativeMovement } from "../cameraMovement";
+import { createPlayerTag, type PlayerTagState } from "../playerTag";
+
+export type WinSceneData = {
+  snapshot: WorldSnapshot;
+  winner: "crew" | "imposters";
+  reason: string;
+};
 
 const MOVE_SPEED = 6.0;
+const BODY_INTERACTION_RANGE_SQ = 16;
+const KILL_INTERACTION_RANGE_SQ = 36;
+const CAMERA_ORTHO_HALF_HEIGHT = 28;
 
 type RemoteSnapshot = { time: number; x: number; z: number };
 
 type PlayerMeshState = {
   mesh: Mesh;
   material: StandardMaterial;
+  tag: PlayerTagState;
   snapshots: RemoteSnapshot[];
 };
 
@@ -63,7 +75,10 @@ export async function createGameScene(
   network: NetworkClient,
   localPlayerId: string | null,
   initialRole: PlayerRole | null,
-  callbacks?: { onPhase: (phase: "meeting" | "ejected" | "noEjection" | "win") => void },
+  callbacks?: {
+    onPhase: (phase: "meeting" | "ejected" | "noEjection") => void;
+    onWin: (data: WinSceneData) => void;
+  },
 ): Promise<Scene> {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
@@ -87,7 +102,7 @@ export async function createGameScene(
 
   const offMessage = network.onMessage((message) => {
     handleServerMessage(scene, players, bodies, message, localPlayerId, session, callbacks);
-    updateHud(hud, session, players, localPlayerId, network);
+    updateHud(hud, session, localPlayerId, network);
   });
 
   const renderLoop = scene.onBeforeRenderObservable.add(() => {
@@ -105,7 +120,7 @@ export async function createGameScene(
     updateRenderTime(session, dt);
     interpolateRemotePlayers(players, localPlayerId, session.clientRenderTime);
     applySabotageVisuals(scene, players, session.latestSnapshot);
-    updateHud(hud, session, players, localPlayerId, network);
+    updateHud(hud, session, localPlayerId, network);
   });
 
   scene.onDisposeObservable.add(() => {
@@ -141,12 +156,12 @@ function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
   camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
   camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
   scene.onBeforeRenderObservable.add(() => {
-    // Keep ortho bounds responsive so zoom stays consistent on resize.
+    // Keep the world-space view size fixed so zoom does not change with screen size.
     const engine = scene.getEngine();
     const width = Math.max(1, engine.getRenderWidth());
     const height = Math.max(1, engine.getRenderHeight());
     const aspect = width / height;
-    const halfHeight = 28;
+    const halfHeight = CAMERA_ORTHO_HALF_HEIGHT;
     const halfWidth = halfHeight * aspect;
     camera.orthoLeft = -halfWidth;
     camera.orthoRight = halfWidth;
@@ -175,7 +190,10 @@ function handleServerMessage(
   message: ServerMessage,
   localPlayerId: string | null,
   session: SessionState,
-  callbacks?: { onPhase: (phase: "meeting" | "ejected" | "noEjection" | "win") => void },
+  callbacks?: {
+    onPhase: (phase: "meeting" | "ejected" | "noEjection") => void;
+    onWin: (data: WinSceneData) => void;
+  },
 ) {
   switch (message.type) {
     case "welcome":
@@ -200,10 +218,24 @@ function handleServerMessage(
       break;
     case "win":
       session.notice = `${message.winner} win: ${message.reason}`;
-      callbacks?.onPhase("win");
+      if (callbacks && session.latestSnapshot) {
+        callbacks.onWin({
+          snapshot: session.latestSnapshot,
+          winner: message.winner,
+          reason: message.reason,
+        });
+      }
       break;
     case "world_snapshot":
-      handleSnapshot(scene, players, bodies, message.snapshot, localPlayerId, session);
+      // Late joiners may miss the initial role packet, so derive it from the authoritative snapshot.
+      if (!session.localRole && localPlayerId) {
+        const localPlayer = message.snapshot.players.find((player) => player.id === localPlayerId);
+        if (localPlayer) {
+          session.localRole = localPlayer.role;
+          session.notice = `Role: ${localPlayer.role}`;
+        }
+      }
+      handleSnapshot(scene, players, bodies, message.snapshot, localPlayerId, session, callbacks);
       break;
   }
 }
@@ -215,15 +247,24 @@ function handleSnapshot(
   snapshot: WorldSnapshot,
   localPlayerId: string | null,
   session: SessionState,
+  callbacks?: {
+    onPhase: (phase: "meeting" | "ejected" | "noEjection") => void;
+    onWin: (data: WinSceneData) => void;
+  },
 ) {
   session.latestSnapshot = snapshot;
   session.phase = snapshot.phase;
   session.latestServerTime = Math.max(session.latestServerTime, snapshot.serverTime);
 
+  if (snapshot.phase === "win" && snapshot.win) {
+    callbacks?.onWin({ snapshot, winner: snapshot.win.winner, reason: snapshot.win.reason });
+  }
+
   const livePlayerIds = new Set<string>();
   for (const snapshotPlayer of snapshot.players) {
     livePlayerIds.add(snapshotPlayer.id);
     const state = upsertPlayerMesh(scene, players, snapshotPlayer);
+    updatePlayerTagColor(state.tag, snapshotPlayer.role, session.localRole);
 
     if (snapshotPlayer.id === localPlayerId) {
       reconcileLocalPlayer(state, snapshotPlayer, session.pendingInputs);
@@ -267,8 +308,9 @@ function handleLocalPlayerMovement(
   dt: number,
 ) {
   const input = controller.getInput();
-  const ix = input.x;
-  const iz = input.z;
+  const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
+  const ix = movement.x;
+  const iz = movement.z;
 
   const localState = localPlayerId ? players.get(localPlayerId) : undefined;
   const localPlayer = localPlayerId ? session.latestSnapshot?.players.find((player) => player.id === localPlayerId) : undefined;
@@ -413,9 +455,17 @@ function upsertPlayerMesh(
   mesh.material = material;
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
 
-  const playerState = { mesh, material, snapshots: [] };
+  const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
+  tag.mesh.parent = mesh;
+
+  const playerState = { mesh, material, tag, snapshots: [] };
   players.set(snapshotPlayer.id, playerState);
   return playerState;
+}
+
+function updatePlayerTagColor(tag: PlayerTagState, playerRole: PlayerRole, localRole: PlayerRole | null) {
+  // Only an impostor client gets the red impostor-name reveal.
+  tag.setTextColor(localRole === "imposter" && playerRole === "imposter" ? "#ff4d4d" : "#ffffff");
 }
 
 function upsertBodyMesh(
@@ -446,6 +496,9 @@ function cleanupDisconnectedPlayers(players: Map<string, PlayerMeshState>, liveI
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
     state.material.dispose();
+    state.tag.mesh.dispose();
+    state.tag.material.dispose();
+    state.tag.texture.dispose();
     players.delete(id);
   }
 }
@@ -534,21 +587,24 @@ function createHud(): HudState {
 function updateHud(
   hud: HudState,
   session: SessionState,
-  players: Map<string, PlayerMeshState>,
   localPlayerId: string | null,
   network: NetworkClient,
 ) {
   const snapshot = session.latestSnapshot;
   const localPlayer = snapshot?.players.find((player) => player.id === localPlayerId) ?? null;
-  const localMesh = localPlayerId ? players.get(localPlayerId)?.mesh : undefined;
-  const localX = localMesh?.position.x ?? localPlayer?.x;
-  const localZ = localMesh?.position.z ?? localPlayer?.z;
+  // Use the server snapshot for interaction checks so prediction/interpolation never skews range.
+  const localX = localPlayer?.x;
+  const localZ = localPlayer?.z;
   const nearbyBody = snapshot && localPlayer && localX !== undefined && localZ !== undefined
     ? findNearbyBody(localX, localZ, snapshot.deadBodies)
     : null;
   const nearbyTarget = snapshot && localPlayer && localX !== undefined && localZ !== undefined
     ? findNearbyAliveTarget(localX, localZ, localPlayer.id, snapshot.players)
     : null;
+  const isAlive = session.phase === "playing" && localPlayer?.state === "alive";
+  const canReport = isAlive && nearbyBody !== null;
+  const canKill = isAlive && nearbyTarget !== null && (session.localRole === "imposter" || session.localRole === "sheriff");
+  const canSabotage = isAlive && session.localRole === "imposter";
 
   hud.status.innerHTML = [
     `<strong>Phase:</strong> ${session.phase}`,
@@ -557,39 +613,23 @@ function updateHud(
   ].join("<br />");
 
   hud.actions.replaceChildren();
-  if (snapshot && localPlayer) {
-    if (session.phase === "playing" && localPlayer.state === "alive" && nearbyBody) {
-      hud.actions.append(
-        createHudButton("Report", () => {
-          network.sendMessage({ type: "report_body", bodyId: nearbyBody.id });
-        }),
-      );
-    }
-
-    if (
-      session.phase === "playing" &&
-      localPlayer.state === "alive" &&
-      nearbyTarget &&
-      (session.localRole === "imposter" || session.localRole === "sheriff")
-    ) {
-      hud.actions.append(
-        createHudButton("Kill", () => {
-          network.sendMessage({ type: "kill", targetId: nearbyTarget.id });
-        }),
-      );
-    }
-
-    if (session.phase === "playing" && localPlayer.state === "alive" && session.localRole === "imposter") {
-      hud.actions.append(
-        createHudButton("Lights", () => {
-          network.sendMessage({ type: "sabotage", kind: "lights_off" });
-        }),
-        createHudButton("Gray", () => {
-          network.sendMessage({ type: "sabotage", kind: "gray_players" });
-        }),
-      );
-    }
-  }
+  // Keep the action bar stable so the player always sees the full set of buttons.
+  hud.actions.append(
+    createHudButton("Report", canReport, () => {
+      if (!nearbyBody) return;
+      network.sendMessage({ type: "report_body", bodyId: nearbyBody.id });
+    }),
+    createHudButton("Kill", canKill, () => {
+      if (!nearbyTarget) return;
+      network.sendMessage({ type: "kill", targetId: nearbyTarget.id });
+    }),
+    createHudButton("Lights", canSabotage, () => {
+      network.sendMessage({ type: "sabotage", kind: "lights_off" });
+    }),
+    createHudButton("Gray", canSabotage, () => {
+      network.sendMessage({ type: "sabotage", kind: "gray_players" });
+    }),
+  );
 
   if (snapshot?.phase === "meeting" && localPlayer?.state === "alive") {
     hud.meeting.style.display = "block";
@@ -600,17 +640,22 @@ function updateHud(
   }
 }
 
-function createHudButton(label: string, onClick: () => void) {
+function createHudButton(label: string, enabled: boolean, onClick: () => void) {
   const button = document.createElement("button");
   button.textContent = label;
   button.style.padding = "0.8rem 1rem";
   button.style.border = "0";
   button.style.borderRadius = "999px";
-  button.style.background = "#f35f7d";
+  button.style.background = enabled ? "#f35f7d" : "#6a7280";
   button.style.color = "white";
   button.style.fontWeight = "700";
-  button.style.cursor = "pointer";
-  button.onclick = onClick;
+  button.style.cursor = enabled ? "pointer" : "not-allowed";
+  button.style.opacity = enabled ? "1" : "0.45";
+  button.disabled = !enabled;
+  button.onclick = () => {
+    if (!enabled) return;
+    onClick();
+  };
   return button;
 }
 
@@ -629,14 +674,14 @@ function renderMeetingHud(
 
   for (const player of snapshot.players.filter((entry) => entry.state === "alive" && entry.id !== localPlayerId)) {
     root.appendChild(
-      createHudButton(`Vote ${player.name}`, () => {
+      createHudButton(`Vote ${player.name}`, true, () => {
         network.sendMessage({ type: "vote", target: player.id });
       }),
     );
   }
 
   root.appendChild(
-    createHudButton("Skip", () => {
+    createHudButton("Skip", true, () => {
       network.sendMessage({ type: "vote", target: "skip" });
     }),
   );
@@ -644,7 +689,7 @@ function renderMeetingHud(
 
 function findNearbyBody(x: number, z: number, bodies: SnapshotDeadBody[]) {
   let best: SnapshotDeadBody | null = null;
-  let bestDistSq = 16;
+  let bestDistSq = BODY_INTERACTION_RANGE_SQ;
 
   for (const body of bodies) {
     if (body.reported) continue;
@@ -660,7 +705,7 @@ function findNearbyBody(x: number, z: number, bodies: SnapshotDeadBody[]) {
 
 function findNearbyAliveTarget(x: number, z: number, playerId: string, players: SnapshotPlayer[]) {
   let best: SnapshotPlayer | null = null;
-  let bestDistSq = 16;
+  let bestDistSq = KILL_INTERACTION_RANGE_SQ;
 
   for (const candidate of players) {
     if (candidate.id === playerId || candidate.state !== "alive") continue;
@@ -691,7 +736,10 @@ function setupPlayerController() {
   window.addEventListener("keyup", onKeyUp);
 
   const joyZone = document.getElementById("joystickZone") as HTMLDivElement | null;
-  if (joyZone) joyZone.classList.add("is-active");
+  if (joyZone) {
+    joyZone.innerHTML = "";
+    joyZone.classList.add("is-active");
+  }
   let activePointerId: number | null = null;
   let activeTouchId: number | null = null;
 

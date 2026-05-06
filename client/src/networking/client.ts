@@ -2,10 +2,17 @@ import type { ClientMessage, ServerMessage, WelcomeMessage } from "./message";
 
 type MessageHandler = (msg: ServerMessage) => void;
 
+type DisconnectHandler = () => void;
+
 export class NetworkClient {
   private connection: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private messageHandlers = new Set<MessageHandler>();
+  private disconnectHandlers = new Set<DisconnectHandler>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private isDisconnecting = false;
 
   private getUrl(): string {
     // Read HTTP server base URI from env and default locally if missing.
@@ -25,7 +32,7 @@ export class NetworkClient {
     return `${wsProtocol}//${base.host}${basePath}/ws`;
   }
 
-  async connect(): Promise<void> {
+async connect(): Promise<void> {
     // Reuse an active socket immediately to avoid duplicate connections.
     if (this.isConnected()) return;
 
@@ -40,11 +47,13 @@ export class NetworkClient {
 
       this.connection.onopen = () => {
         this.connectPromise = null;
+        this.reconnectAttempts = 0;
         res();
       };
 
       this.connection.onerror = () => {
         this.connectPromise = null;
+        this.handleDisconnect(false);
         rej(new Error("Failed to connect socket"));
       };
 
@@ -60,10 +69,29 @@ export class NetworkClient {
       this.connection.onclose = () => {
         this.connection = null;
         this.connectPromise = null;
+        this.handleDisconnect(this.isDisconnecting);
       };
     });
 
     return this.connectPromise;
+  }
+
+  private handleDisconnect(wasIntentional: boolean) {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
+    this.disconnectHandlers.forEach((handler) => handler());
+
+    if (!wasIntentional && this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+      this.reconnectTimeout = setTimeout(() => {
+        this.reconnectTimeout = null;
+        this.connect();
+      }, delay);
+    }
   }
 
   async join(options: { name?: string; spectator?: boolean } = {}): Promise<WelcomeMessage> {
@@ -85,9 +113,7 @@ export class NetworkClient {
   }
 
   sendMessage(message: ClientMessage): boolean {
-    // Prevent sending if socket is not yet connected.
     if (!this.isConnected()) {
-      console.error("WebSocket is not open; message dropped", message);
       return false;
     }
 
@@ -114,8 +140,21 @@ export class NetworkClient {
 
   disconnect() {
     // Close the websocket cleanly when app exits or reconnect is needed.
+    this.isDisconnecting = true;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     this.connection?.close();
     this.connection = null;
     this.connectPromise = null;
+    this.reconnectAttempts = 0;
+  }
+
+  onDisconnect(handler: DisconnectHandler) {
+    this.disconnectHandlers.add(handler);
+    return () => {
+      this.disconnectHandlers.delete(handler);
+    };
   }
 }

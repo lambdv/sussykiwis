@@ -42,6 +42,7 @@ export type SnapshotPlayer = {
   id: string;
   name: string;
   color: string;
+  role: PlayerRole;
   x: number;
   z: number;
   state: PlayerState;

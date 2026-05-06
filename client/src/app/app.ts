@@ -2,6 +2,7 @@ import { Engine, Scene, WebGPUEngine } from "@babylonjs/core";
 import { createMenuScene } from "../game/scenes/mainMenuScene";
 import { createGameScene } from "../game/scenes/gameScene";
 import { createPreMatchScene } from "../game/scenes/preMatchScene";
+import { createRoleAssignmentScene } from "../game/scenes/roleAssignmentScene";
 import { createServerViewScene } from "../game/scenes/serverViewScene";
 import { createMeetingScene } from "../game/scenes/meetingScene";
 import { createEjectedScene } from "../game/scenes/ejectedScene";
@@ -10,8 +11,9 @@ import { createWinScene } from "../game/scenes/winScene";
 import { NetworkClient } from "../networking/client";
 import type { PlayerRole } from "../networking/message";
 import { createQueueScene } from "../game/scenes/queueScene";
+import type { WinSceneData } from "../game/scenes/gameScene";
 
-export type AppState = "menu" | "queue" | "preMatch" | "game" | "meeting" | "ejected" | "noEjection" | "win" | "serverView";
+export type AppState = "menu" | "queue" | "preMatch" | "roleAssignment" | "game" | "meeting" | "ejected" | "noEjection" | "win" | "serverView";
 
 export class App {
   private router: Router;
@@ -48,6 +50,7 @@ export class Router {
   private transitionToken = 0;
   private localPlayerId: string | null = null;
   private localRole: PlayerRole | null = null;
+  private lastWinData: WinSceneData | null = null;
 
   constructor(
     private engine: Engine | WebGPUEngine,
@@ -61,7 +64,7 @@ export class Router {
     });
   }
 
-  async goTo(key: AppState): Promise<void> {
+  async goTo(key: AppState, winData: WinSceneData | null = null): Promise<void> {
     // Bump the token so stale async work from prior routes is ignored.
     this.transitionToken += 1;
 
@@ -71,6 +74,9 @@ export class Router {
     }
 
     this.state = key;
+    if (winData) {
+      this.lastWinData = winData;
+    }
 
     // Dispose previous scene before constructing the new route scene.
     this.currentScene?.dispose();
@@ -83,6 +89,7 @@ export class Router {
         break;
 
       case "queue":
+        this.network.disconnect();
         this.currentScene = createQueueScene(this.engine, {
           onEnter: () => {
             // Start the join handshake while queue scene is shown.
@@ -99,9 +106,36 @@ export class Router {
           this.localPlayerId,
           {
             onMatchReady: () => {
-              // Enter the gameplay scene once server marks sub-state as in-game.
+              // Enter the dedicated role reveal scene once server marks sub-state as in-game.
               if (this.state === "preMatch") {
+                void this.goTo("roleAssignment");
+              }
+            },
+          },
+        );
+        break;
+
+      case "roleAssignment":
+        this.currentScene = createRoleAssignmentScene(
+          this.engine,
+          this.canvas,
+          this.network,
+          this.localPlayerId,
+          this.localRole,
+          {
+            onDone: () => {
+              if (this.state === "roleAssignment") {
                 void this.goTo("game");
+              }
+            },
+            onPhase: (phase) => {
+              if (this.state === "roleAssignment") {
+                void this.goTo(phase);
+              }
+            },
+            onWin: (data) => {
+              if (this.state === "roleAssignment") {
+                void this.goTo("win", data);
               }
             },
           },
@@ -115,6 +149,18 @@ export class Router {
           this.network,
           this.localPlayerId,
           this.localRole,
+          {
+            onPhase: (phase) => {
+              if (this.state === "game") {
+                void this.goTo(phase);
+              }
+            },
+            onWin: (data) => {
+              if (this.state === "game") {
+                void this.goTo("win", data);
+              }
+            },
+          },
         );
         break;
 
@@ -137,8 +183,8 @@ export class Router {
         break;
 
       case "win":
-        this.currentScene = createWinScene(this.engine, this.canvas, this.network, this.localPlayerId, {
-          onDone: () => void this.goTo("menu"),
+        this.currentScene = createWinScene(this.engine, this.canvas, this.lastWinData, {
+          onDone: () => void this.goTo("queue"),
         });
         break;
 

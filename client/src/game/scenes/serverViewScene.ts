@@ -1,5 +1,6 @@
 import {
   ArcRotateCamera,
+  Camera,
   Color3,
   Color4,
   Engine,
@@ -11,15 +12,19 @@ import {
   Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
-import { AdvancedDynamicTexture, Control, Rectangle, StackPanel, TextBlock } from "@babylonjs/gui";
+import { AdvancedDynamicTexture, Control, Image, Rectangle, StackPanel, TextBlock } from "@babylonjs/gui";
+import QRCode from "qrcode";
 import { NetworkClient } from "../../networking/client";
 import type { GamePhase, ServerMessage, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
+import { createPlayerTag, type PlayerTagState } from "../playerTag";
+import { createMeetingOverlay } from "../ui/meetingOverlay";
 
 const MAP_HALF_EXTENT = 60;
 
 type PlayerMeshState = {
   mesh: Mesh;
   material: StandardMaterial;
+  tag: PlayerTagState;
 };
 
 type BodyMeshState = {
@@ -39,9 +44,20 @@ type HudState = {
   mode: TextBlock;
   status: TextBlock;
   subtitle: TextBlock;
+  qrFrame: Rectangle;
+  qrImage: Image;
+  qrAdvert: TextBlock;
   rosterPanel: StackPanel;
   detailPanel: StackPanel;
 };
+
+type SceneMetadataState = {
+  meetingOverlay?: ReturnType<typeof createMeetingOverlay>;
+};
+
+const SERVER_VIEW_AD_TEXT = "School of Engineering and Computer Sciense";
+const SERVER_VIEW_JOIN_URL = `${window.location.origin.replace(/\/$/, "")}/`;
+const SERVER_VIEW_ORTHO_HALF_HEIGHT = 70;
 
 export function createServerViewScene(
   engine: Engine | WebGPUEngine,
@@ -57,6 +73,14 @@ export function createServerViewScene(
   const players = new Map<string, PlayerMeshState>();
   const bodies = new Map<string, BodyMeshState>();
   const hud = createHud(scene);
+  const meetingOverlay = createMeetingOverlay({
+    localPlayerId: null,
+    network: null,
+    readOnly: true,
+  });
+  const metadata = ((scene.metadata as SceneMetadataState | null) ?? {});
+  metadata.meetingOverlay = meetingOverlay;
+  scene.metadata = metadata;
   const state: ServerViewState = {
     connected: false,
     status: "Connecting to server view...",
@@ -72,6 +96,7 @@ export function createServerViewScene(
     // Tear down the spectator UI and any meshes created from snapshots.
     offMessage();
     hud.ui.dispose();
+    meetingOverlay.dispose();
 
     for (const player of players.values()) {
       player.mesh.dispose();
@@ -88,16 +113,38 @@ export function createServerViewScene(
   });
 
   updateHud(hud, state);
+  meetingOverlay.update({ snapshot: state.snapshot, notice: state.status });
+  void updateQr(hud);
 
   return scene;
 }
 
 function createCamera(scene: Scene) {
-  // Lock the camera into a fixed overhead angle so spectators see the full map.
-  const camera = new ArcRotateCamera("server-view-camera", -Math.PI / 2, 0.14, 135, Vector3.Zero(), scene);
+  // Lock the camera into a fixed orthographic isometric angle, zoomed out for full map.
+  const camera = new ArcRotateCamera(
+    "server-view-camera",
+    -Math.PI / 4,
+    0.95,
+    52,
+    Vector3.Zero(),
+    scene,
+  );
   camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
   camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
-  camera.inputs.clear();
+  camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+  scene.onBeforeRenderObservable.add(() => {
+    // Keep the world-space view size fixed so zoom does not change with screen size.
+    const engine = scene.getEngine();
+    const width = Math.max(1, engine.getRenderWidth());
+    const height = Math.max(1, engine.getRenderHeight());
+    const aspect = width / height;
+    const halfHeight = SERVER_VIEW_ORTHO_HALF_HEIGHT;
+    const halfWidth = halfHeight * aspect;
+    camera.orthoLeft = -halfWidth;
+    camera.orthoRight = halfWidth;
+    camera.orthoBottom = -halfHeight;
+    camera.orthoTop = halfHeight;
+  });
   scene.activeCamera = camera;
 }
 
@@ -185,6 +232,14 @@ function createHud(scene: Scene): HudState {
   subtitle.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
   panel.addControl(subtitle);
 
+  const qrAdvert = new TextBlock("server-view-qr-advert");
+  qrAdvert.text = SERVER_VIEW_AD_TEXT;
+  qrAdvert.color = "#ffffff";
+  qrAdvert.fontSize = 20;
+  qrAdvert.height = "36px";
+  qrAdvert.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
+  panel.addControl(qrAdvert);
+
   const rosterTitle = new TextBlock("server-view-roster-title");
   rosterTitle.text = "Joined players";
   rosterTitle.color = "white";
@@ -205,7 +260,29 @@ function createHud(scene: Scene): HudState {
   detailPanel.horizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
   panel.addControl(detailPanel);
 
-  return { ui, root, mode, status, subtitle, rosterPanel, detailPanel };
+  const qrFrame = new Rectangle("server-view-qr-frame");
+  qrFrame.width = "320px";
+  qrFrame.height = "380px";
+  qrFrame.thickness = 2;
+  qrFrame.cornerRadius = 18;
+  qrFrame.background = "rgba(10, 15, 24, 0.94)";
+  qrFrame.horizontalAlignment = Control.HORIZONTAL_ALIGNMENT_RIGHT;
+  qrFrame.verticalAlignment = Control.VERTICAL_ALIGNMENT_BOTTOM;
+  qrFrame.left = "-24px";
+  qrFrame.top = "-24px";
+  qrFrame.paddingTop = "16px";
+  qrFrame.paddingBottom = "16px";
+  qrFrame.paddingLeft = "16px";
+  qrFrame.paddingRight = "16px";
+  root.addControl(qrFrame);
+
+  const qrImage = new Image("server-view-qr", "");
+  qrImage.width = "100%";
+  qrImage.height = "300px";
+  qrImage.stretch = Image.STRETCH_UNIFORM;
+  qrFrame.addControl(qrImage);
+
+  return { ui, root, mode, status, subtitle, qrFrame, qrImage, qrAdvert, rosterPanel, detailPanel };
 }
 
 function handleServerMessage(
@@ -221,26 +298,31 @@ function handleServerMessage(
       state.connected = true;
       state.status = message.observer ? "Connected as observer" : `Connected as ${message.name}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "game_started":
       state.status = `Round started: ${message.role}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "meeting_started":
       state.status = `Meeting called for ${message.reportedBodyId.slice(0, 6)}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "vote_update":
       state.status = `Votes ${message.votesCast}/${message.totalVoters}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "meeting_chat":
       state.status = `${message.name}: ${message.message}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "ejection_result":
@@ -248,21 +330,31 @@ function handleServerMessage(
         ? `${message.playerId.slice(0, 6)} ejected${message.wasImposter ? " (imposter)" : ""}`
         : "No one was ejected";
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "win":
       state.status = `${message.winner} win: ${message.reason}`;
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
 
     case "world_snapshot":
       state.snapshot = message.snapshot;
       state.status = formatSnapshotStatus(message.snapshot);
-      setSceneTheme(scene, message.snapshot.phase);
+      setSceneTheme(scene, message.snapshot.phase, message.snapshot.activeSabotages);
+      applySabotageVisuals(players, message.snapshot);
       syncWorld(scene, players, bodies, message.snapshot);
       updateHud(hud, state);
+      updateMeetingOverlay(scene, state);
       break;
   }
+}
+
+function updateMeetingOverlay(scene: Scene, state: ServerViewState) {
+  // Keep the server projector on the shared meeting overlay whenever a meeting is active.
+  const metadata = scene.metadata as SceneMetadataState | null;
+  metadata?.meetingOverlay?.update({ snapshot: state.snapshot, notice: state.status });
 }
 
 function formatSnapshotStatus(snapshot: WorldSnapshot) {
@@ -282,10 +374,13 @@ function formatSnapshotStatus(snapshot: WorldSnapshot) {
       : "Live match";
 }
 
-function setSceneTheme(scene: Scene, phase: GamePhase) {
+function setSceneTheme(scene: Scene, phase: GamePhase, activeSabotages: WorldSnapshot["activeSabotages"]) {
   // Change the background tint so spectators can see the state change instantly.
+  const lightsOff = activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
   scene.clearColor =
-    phase === "lobby"
+    lightsOff
+      ? new Color4(0.05, 0.07, 0.13, 1)
+      : phase === "lobby"
       ? new Color4(0.07, 0.1, 0.13, 1)
       : phase === "playing"
         ? new Color4(0.08, 0.12, 0.09, 1)
@@ -327,6 +422,21 @@ function syncWorld(
   cleanupBodies(bodies, liveBodyIds);
 }
 
+function applySabotageVisuals(players: Map<string, PlayerMeshState>, snapshot: WorldSnapshot) {
+  // Mirror the gameplay scene tinting so the server view matches live match visibility.
+  const grayPlayers = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "gray_players");
+  const snapshotPlayers = new Map(snapshot.players.map((player) => [player.id, player]));
+
+  for (const [id, state] of players) {
+    const snapshotPlayer = snapshotPlayers.get(id);
+    if (!snapshotPlayer) continue;
+
+    state.material.diffuseColor = grayPlayers
+      ? Color3.FromHexString("#8e909a")
+      : safeColor(snapshotPlayer.color, Color3.FromHexString("#94a3b8"));
+  }
+}
+
 function upsertPlayer(scene: Scene, players: Map<string, PlayerMeshState>, player: SnapshotPlayer) {
   let state = players.get(player.id);
   if (state) return state;
@@ -341,7 +451,10 @@ function upsertPlayer(scene: Scene, players: Map<string, PlayerMeshState>, playe
   material.diffuseColor = safeColor(player.color, Color3.FromHexString("#94a3b8"));
   mesh.material = material;
 
-  state = { mesh, material };
+  const tag = createPlayerTag(scene, player.id, player.name);
+  tag.mesh.parent = mesh;
+
+  state = { mesh, material, tag };
   players.set(player.id, state);
   return state;
 }
@@ -367,6 +480,9 @@ function cleanupPlayers(players: Map<string, PlayerMeshState>, liveIds: Set<stri
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
     state.material.dispose();
+    state.tag.mesh.dispose();
+    state.tag.material.dispose();
+    state.tag.texture.dispose();
     players.delete(id);
   }
 }
@@ -387,6 +503,8 @@ function updateHud(hud: HudState, state: ServerViewState) {
   hud.subtitle.text = state.snapshot
     ? state.snapshot.phase === "lobby"
       ? "Lobby overview with all joined players"
+      : state.snapshot.phase === "meeting"
+        ? "Meeting overview with vote breakdown"
       : "Bird's-eye match feed"
     : state.connected
       ? "Waiting for the first server snapshot"
@@ -427,6 +545,7 @@ function updateHud(hud: HudState, state: ServerViewState) {
     label.color = "white";
     label.fontSize = 18;
     label.height = "28px";
+    label.width = "220px";
     label.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
     label.paddingLeft = "10px";
 
@@ -435,27 +554,22 @@ function updateHud(hud: HudState, state: ServerViewState) {
     hud.rosterPanel.addControl(row);
   }
 
-  if (state.snapshot.meeting) {
-    for (const vote of state.snapshot.meeting.voteCounts) {
-      const row = new TextBlock();
-      row.text = `${vote.target ? vote.target.slice(0, 6) : "skip"}: ${vote.votes}`;
-      row.color = "#f8fafc";
-      row.fontSize = 18;
-      row.height = "28px";
-      row.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
-      hud.detailPanel.addControl(row);
-    }
+}
 
-    for (const line of state.snapshot.meeting.chat) {
-      const row = new TextBlock();
-      row.text = `${line.name}: ${line.message}`;
-      row.color = "#e2e8f0";
-      row.fontSize = 16;
-      row.height = "24px";
-      row.textHorizontalAlignment = Control.HORIZONTAL_ALIGNMENT_LEFT;
-      hud.detailPanel.addControl(row);
-    }
-  }
+async function updateQr(hud: HudState) {
+  // Render the join URL as a large QR so players can scan into the game quickly.
+  const dataUrl = await QRCode.toDataURL(SERVER_VIEW_JOIN_URL, {
+    width: 512,
+    margin: 1,
+    errorCorrectionLevel: "M",
+    color: {
+      dark: "#111827",
+      light: "#ffffff",
+    },
+  });
+
+  hud.qrImage.source = dataUrl;
+  hud.qrAdvert.text = SERVER_VIEW_AD_TEXT;
 }
 
 function safeColor(value: string, fallback: Color3) {
