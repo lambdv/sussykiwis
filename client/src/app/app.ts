@@ -2,23 +2,32 @@ import { Engine, Scene, WebGPUEngine } from "@babylonjs/core";
 import { createMenuScene } from "../game/scenes/mainMenuScene";
 import { createGameScene } from "../game/scenes/gameScene";
 import { createPreMatchScene } from "../game/scenes/preMatchScene";
+import { createServerViewScene } from "../game/scenes/serverViewScene";
+import { createMeetingScene } from "../game/scenes/meetingScene";
+import { createEjectedScene } from "../game/scenes/ejectedScene";
+import { createNoEjectionScene } from "../game/scenes/noEjectionScene";
+import { createWinScene } from "../game/scenes/winScene";
 import { NetworkClient } from "../networking/client";
-import type { PlayerRole, ServerMessage, WelcomeMessage } from "../networking/message";
+import type { PlayerRole } from "../networking/message";
 import { createQueueScene } from "../game/scenes/queueScene";
 
-export type AppState = "menu" | "queue" | "preMatch" | "game";
+export type AppState = "menu" | "queue" | "preMatch" | "game" | "meeting" | "ejected" | "noEjection" | "win" | "serverView";
 
 export class App {
   private router: Router;
 
-  constructor(engine: Engine | WebGPUEngine, canvas: HTMLCanvasElement) {
+  constructor(
+    engine: Engine | WebGPUEngine,
+    canvas: HTMLCanvasElement,
+    private initialState: AppState = "menu",
+  ) {
     // Keep a single router instance that owns state transitions.
     this.router = new Router(engine, canvas);
   }
 
   async start() {
-    // Start the app at the main menu scene.
-    await this.router.goTo("menu");
+    // Start the app at the requested route.
+    await this.router.goTo(this.initialState);
   }
 
   tick() {
@@ -55,6 +64,12 @@ export class Router {
   async goTo(key: AppState): Promise<void> {
     // Bump the token so stale async work from prior routes is ignored.
     this.transitionToken += 1;
+
+    // Reset the shared socket when switching between player and spectator modes.
+    if (this.state === "serverView" || key === "serverView") {
+      this.network.disconnect();
+    }
+
     this.state = key;
 
     // Dispose previous scene before constructing the new route scene.
@@ -102,19 +117,51 @@ export class Router {
           this.localRole,
         );
         break;
+
+      case "meeting":
+        this.currentScene = await createMeetingScene(this.engine, this.canvas, this.network, this.localPlayerId, {
+          onResolved: (next) => void this.goTo(next),
+        });
+        break;
+
+      case "ejected":
+        this.currentScene = createEjectedScene(this.engine, this.canvas, this.network, this.localPlayerId, {
+          onDone: () => void this.goTo("game"),
+        });
+        break;
+
+      case "noEjection":
+        this.currentScene = createNoEjectionScene(this.engine, this.canvas, this.network, this.localPlayerId, {
+          onDone: () => void this.goTo("game"),
+        });
+        break;
+
+      case "win":
+        this.currentScene = createWinScene(this.engine, this.canvas, this.network, this.localPlayerId, {
+          onDone: () => void this.goTo("menu"),
+        });
+        break;
+
+      case "serverView":
+        this.currentScene = createServerViewScene(this.engine, this.network);
+        void this.joinAndEnterServerView(this.transitionToken);
+        break;
     }
   }
 
   private async joinAndEnterGame(token: number) {
     try {
-      // Open WS connection to the Rust server before joining.
-      await this.network.connect();
+      // If route changed while connecting, stop this stale transition.
+      if (token !== this.transitionToken || this.state !== "queue") return;
+
+      // Join the authoritative game as a player and capture the server identity.
+      const welcome = await this.network.join();
 
       // If route changed while connecting, stop this stale transition.
       if (token !== this.transitionToken || this.state !== "queue") return;
 
-      // Send join request and continue into pre-match waiting world.
-      this.localPlayerId = await this.waitForWelcome(token);
+      // Keep the player id for later world scenes.
+      this.localPlayerId = welcome.playerId;
       await this.goTo("preMatch");
     } catch (error) {
       // On handshake failure, return user to menu safely.
@@ -125,41 +172,24 @@ export class Router {
     }
   }
 
-  private waitForWelcome(token: number): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      // Attach a temporary listener so we can wait for the server identity.
-      const offMessage = this.network.onMessage((message: ServerMessage) => {
-        const welcome = readWelcomeMessage(message);
-        if (!welcome) return;
-        offMessage();
-        resolve(welcome.playerId);
-      });
+  private async joinAndEnterServerView(token: number) {
+    try {
+      // Join the projector session as a non-playing spectator.
+      await this.network.join({ name: "Spectator", spectator: true });
 
-      // Stop waiting if the route changed before the join completed.
-      if (token !== this.transitionToken || this.state !== "queue") {
-        offMessage();
-        reject(new Error("Join cancelled"));
-        return;
+      // Stop if the route changed before the welcome packet arrived.
+      if (token !== this.transitionToken || this.state !== "serverView") return;
+    } catch (error) {
+      // Fall back to the menu if the observer handshake fails.
+      console.error("Failed to join server view:", error);
+      if (token === this.transitionToken && this.state === "serverView") {
+        void this.goTo("menu");
       }
-
-      if (!this.network.sendMessage({ type: "join" })) {
-        offMessage();
-        reject(new Error("Failed to send join message"));
-      }
-    });
+    }
   }
 
   render() {
     // Draw the active scene if one exists.
     this.currentScene?.render();
   }
-}
-
-function readWelcomeMessage(message: ServerMessage): WelcomeMessage | null {
-  // Narrow the server message union to the welcome payload shape.
-  if (message.type !== "welcome") {
-    return null;
-  }
-
-  return message;
 }

@@ -234,6 +234,9 @@ function handleLocalPlayerMovement(
     localState.mesh.position.x = clampToMap(localState.mesh.position.x + ix * MOVE_SPEED * dt);
     localState.mesh.position.z = clampToMap(localState.mesh.position.z + iz * MOVE_SPEED * dt);
     session.pendingInputs.push({ seq: input.seq, moveX: ix, moveZ: iz, dt });
+    if (session.pendingInputs.length > 120) {
+      session.pendingInputs.shift();
+    }
   }
 
   if (localState) {
@@ -272,11 +275,15 @@ function reconcileLocalPlayer(state: PlayerMeshState, snapshotPlayer: SnapshotPl
   const clampedZ = clampToMap(targetZ);
   const dx = clampedX - state.mesh.position.x;
   const dz = clampedZ - state.mesh.position.z;
+  const distSq = dx * dx + dz * dz;
 
-  // Snap only when drift is meaningful to avoid visible lobby jitter.
-  if (dx * dx + dz * dz > 0.1) {
+  // Smooth tiny corrections but snap larger desyncs to remove visible jitter.
+  if (distSq > 9) {
     state.mesh.position.x = clampedX;
     state.mesh.position.z = clampedZ;
+  } else {
+    state.mesh.position.x += dx * 0.35;
+    state.mesh.position.z += dz * 0.35;
   }
 }
 

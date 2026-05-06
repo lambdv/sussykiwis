@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerMessage } from "./message";
+import type { ClientMessage, ServerMessage, WelcomeMessage } from "./message";
 
 type MessageHandler = (msg: ServerMessage) => void;
 
@@ -64,6 +64,24 @@ export class NetworkClient {
     });
 
     return this.connectPromise;
+  }
+
+  async join(options: { name?: string; spectator?: boolean } = {}): Promise<WelcomeMessage> {
+    // Reuse the shared socket, then wait for the server welcome packet.
+    await this.connect();
+
+    return new Promise<WelcomeMessage>((resolve, reject) => {
+      const offMessage = this.onMessage((message) => {
+        if (message.type !== "welcome") return;
+        offMessage();
+        resolve(message);
+      });
+
+      if (!this.sendMessage({ type: "join", name: options.name, spectator: options.spectator })) {
+        offMessage();
+        reject(new Error("Failed to send join message"));
+      }
+    });
   }
 
   sendMessage(message: ClientMessage): boolean {

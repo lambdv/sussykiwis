@@ -8,14 +8,16 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::lobby::networking::model::{
-    ActiveSabotage, Faction, GamePhase, GameSubState, MeetingSnapshot, PlayerRole, PlayerState,
-    SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody, SnapshotPlayer,
-    WinMessage, WorldSnapshot,
+    ActiveSabotage, Faction, GamePhase, GameSubState, MeetingChatMessage, MeetingSnapshot,
+    MeetingVoteCount, PlayerRole, PlayerState, SabotageKind, ServerEvent, ServerResponse,
+    SnapshotDeadBody, SnapshotPlayer, WinMessage, WorldSnapshot,
 };
 
 const MIN_PLAYERS: usize = 4;
 const KILL_RANGE: f32 = 4.0;
 const REPORT_RANGE: f32 = 4.0;
+pub const TICK_RATE: u32 = 20;
+pub const MOVE_SPEED: f32 = 10.0;
 
 pub async fn start_simulation(
     mut game_rx: mpsc::Receiver<GameCommand>,
@@ -65,6 +67,10 @@ pub enum GameCommand {
         id: Uuid,
         target: VoteTarget,
     },
+    MeetingChat {
+        id: Uuid,
+        message: String,
+    },
     Sabotage {
         id: Uuid,
         kind: SabotageKind,
@@ -101,6 +107,7 @@ struct MeetingState {
     started_at_tick: u64,
     ends_at_tick: u64,
     votes: HashMap<Uuid, VoteTarget>,
+    chat: Vec<MeetingChatMessage>,
 }
 
 #[derive(Clone)]
@@ -144,8 +151,8 @@ impl World {
             ejection: None,
             win: None,
             tick: 0,
-            tick_rate: 20,
-            move_speed: 6.0,
+            tick_rate: TICK_RATE,
+            move_speed: MOVE_SPEED,
             map_half_extent: 60.0,
             event_tx,
         }
@@ -198,6 +205,7 @@ impl World {
             GameCommand::Kill { id, target_id } => self.handle_kill(id, target_id),
             GameCommand::ReportBody { id, body_id } => self.handle_report(id, body_id),
             GameCommand::Vote { id, target } => self.handle_vote(id, target),
+            GameCommand::MeetingChat { id, message } => self.handle_meeting_chat(id, message),
             GameCommand::Sabotage { id, kind } => self.handle_sabotage(id, kind),
         }
     }
@@ -239,6 +247,7 @@ impl World {
                 name,
                 tick_rate: self.tick_rate,
                 move_speed: self.move_speed,
+                observer: false,
             },
         });
 
@@ -386,6 +395,7 @@ impl World {
             started_at_tick: self.tick,
             ends_at_tick,
             votes: HashMap::new(),
+            chat: Vec::new(),
         });
 
         for player in self.players.values_mut() {
@@ -443,6 +453,44 @@ impl World {
         if meeting.votes.len() >= alive_players {
             self.resolve_meeting();
         }
+    }
+
+    fn handle_meeting_chat(&mut self, id: Uuid, message: String) {
+        if !matches!(self.phase, GamePhase::Meeting) {
+            return;
+        }
+
+        let Some(player) = self.players.get(&id) else {
+            return;
+        };
+
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let Some(meeting) = self.meeting.as_mut() else {
+            return;
+        };
+
+        let entry = MeetingChatMessage {
+            player_id: id,
+            name: player.name.clone(),
+            message: trimmed.chars().take(120).collect(),
+            server_time: self.tick * 1000 / self.tick_rate as u64,
+        };
+
+        meeting.chat.push(entry.clone());
+        if meeting.chat.len() > 20 {
+            meeting.chat.remove(0);
+        }
+
+        let _ = self.event_tx.send(ServerEvent::Broadcast(ServerResponse::MeetingChat {
+            player_id: entry.player_id,
+            name: entry.name,
+            message: entry.message,
+            server_time: entry.server_time,
+        }));
     }
 
     fn handle_sabotage(&mut self, id: Uuid, kind: SabotageKind) {
@@ -514,6 +562,8 @@ impl World {
                     ends_at_tick: meeting.ends_at_tick,
                     votes_cast: meeting.votes.len(),
                     total_voters: self.count_alive_players(),
+                    vote_counts: self.current_vote_counts(meeting),
+                    chat: meeting.chat.clone(),
                 }),
                 win: self.win.clone(),
             },
@@ -631,6 +681,24 @@ impl World {
                 player_id: ejected_player_id,
                 was_imposter,
             }));
+    }
+
+    fn current_vote_counts(&self, meeting: &MeetingState) -> Vec<MeetingVoteCount> {
+        let mut counts: HashMap<Option<Uuid>, usize> = HashMap::new();
+        for vote in meeting.votes.values() {
+            let key = match vote {
+                VoteTarget::Player(player_id) => Some(*player_id),
+                VoteTarget::Skip => None,
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+
+        let mut result = counts
+            .into_iter()
+            .map(|(target, votes)| MeetingVoteCount { target, votes })
+            .collect::<Vec<_>>();
+        result.sort_by_key(|entry| entry.target.map(|id| id.to_string()).unwrap_or_else(|| "skip".to_string()));
+        result
     }
 
     fn advance_meeting_if_needed(&mut self) {

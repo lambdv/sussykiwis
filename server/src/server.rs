@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::lobby::simulation::start_simulation;
+use crate::lobby::simulation::{MOVE_SPEED, TICK_RATE};
 use crate::lobby::networking::model::{ClientRequest, ServerResponse};
 use crate::{GameCommand, ServerEvent};
 
@@ -135,39 +136,67 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
 
     let (mut sender, mut receiver) = socket.split();
 
-    let requested_name = match read_join_message(&mut receiver).await {
-        Ok(name) => name,
+    let join_request = match read_join_message(&mut receiver).await {
+        Ok(request) => request,
         Err(()) => {
-        warn!("SERVER WS REJECTED: expected initial join message");
-        let _ = sender.close().await;
-        return;
+            warn!("SERVER WS REJECTED: expected initial join message");
+            let _ = sender.close().await;
+            return;
         }
     };
+    let requested_name = join_request.name;
+    let is_spectator = join_request.spectator;
 
     // Allocate identity and subscribe to server event fanout.
     let id = Uuid::new_v4();
     let short_id = id.to_string().chars().take(6).collect::<String>();
-    let fallback_name = format!("Player-{short_id}");
+    let fallback_name = if is_spectator {
+        format!("Observer-{short_id}")
+    } else {
+        format!("Player-{short_id}")
+    };
     let name = requested_name
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(fallback_name);
     let mut event_rx = context.event_tx.subscribe();
 
-    info!(client_id = %id, client_name = %name, "SERVER WS SESSION STARTED");
+    info!(client_id = %id, client_name = %name, spectator = is_spectator, "SERVER WS SESSION STARTED");
 
-    // Register this player in the authoritative game loop.
-    if context
-        .command_tx
-        .send(GameCommand::PlayerJoined {
-            id,
-            name: name.clone(),
-        })
+    // Register only player sessions in the authoritative game loop.
+    if !is_spectator {
+        if context
+            .command_tx
+            .send(GameCommand::PlayerJoined {
+                id,
+                name: name.clone(),
+            })
+            .await
+            .is_err()
+        {
+            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING JOIN");
+            let _ = sender.close().await;
+            return;
+        }
+    }
+
+    if is_spectator {
+        // Spectators skip the game loop registration and get a direct read-only welcome.
+        if send_message(
+            &mut sender,
+            &ServerResponse::Welcome {
+                player_id: id,
+                name: name.clone(),
+                tick_rate: TICK_RATE,
+                move_speed: MOVE_SPEED,
+                observer: true,
+            },
+        )
         .await
         .is_err()
-    {
-        warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING JOIN");
-        let _ = sender.close().await;
-        return;
+        {
+            let _ = sender.close().await;
+            return;
+        }
     }
 
     // Forward server events from the game loop to this websocket.
@@ -281,6 +310,17 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
+                    ClientRequest::MeetingChat { message } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::MeetingChat { id, message })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING MEETING CHAT");
+                            break;
+                        }
+                    }
                     ClientRequest::Sabotage { kind } => {
                         if context
                             .command_tx
@@ -319,15 +359,22 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
     }
 
     // Notify game loop about disconnect and stop forwarding task.
-    let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
+    if !is_spectator {
+        let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
+    }
     info!(client_id = %id, "SERVER WS SESSION ENDED");
     writer_task.abort();
 }
 
 /// Reads and validates the first client packet as a join request.
+struct JoinRequest {
+    name: Option<String>,
+    spectator: bool,
+}
+
 async fn read_join_message(
     receiver: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Result<Option<String>, ()> {
+) -> Result<JoinRequest, ()> {
     loop {
         let Some(result) = receiver.next().await else {
             return Err(());
@@ -340,7 +387,7 @@ async fn read_join_message(
 
         let request = serde_json::from_str::<ClientRequest>(&text).map_err(|_| ())?;
         match request {
-            ClientRequest::Join { name } => return Ok(name),
+            ClientRequest::Join { name, spectator } => return Ok(JoinRequest { name, spectator }),
             ClientRequest::ClientLog {
                 scope,
                 event,
@@ -361,6 +408,7 @@ async fn read_join_message(
             | ClientRequest::Kill { .. }
             | ClientRequest::ReportBody { .. }
             | ClientRequest::Vote { .. }
+            | ClientRequest::MeetingChat { .. }
             | ClientRequest::Sabotage { .. } => return Err(()),
         }
     }

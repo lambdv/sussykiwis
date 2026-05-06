@@ -11,11 +11,12 @@ export type Faction = "crew" | "imposters";
 export type SabotageKind = "lights_off" | "gray_players";
 
 export type ClientMessage =
-  | { type: "join"; name?: string }
+  | { type: "join"; name?: string; spectator?: boolean }
   | { type: "input"; seq: number; moveX: number; moveY: number }
   | { type: "kill"; targetId: string }
   | { type: "report_body"; bodyId: string }
   | { type: "vote"; target: string }
+  | { type: "meeting_chat"; message: string }
   | { type: "sabotage"; kind: SabotageKind }
   | {
       type: "client_log";
@@ -30,6 +31,7 @@ export type WelcomeMessage = {
   name: string;
   tickRate: number;
   moveSpeed: number;
+  observer: boolean;
 };
 
 export type GameStartedMessage = {
@@ -66,6 +68,8 @@ export type MeetingSnapshot = {
   endsAtTick: number;
   votesCast: number;
   totalVoters: number;
+  voteCounts: { target: string | null; votes: number }[];
+  chat: { playerId: string; name: string; message: string; serverTime: number }[];
 };
 
 export type WinState = {
@@ -88,10 +92,11 @@ export type WorldSnapshot = {
 };
 
 export type ServerMessage =
-  | { type: "welcome"; playerId: string; name: string; tickRate: number; moveSpeed: number }
+  | { type: "welcome"; playerId: string; name: string; tickRate: number; moveSpeed: number; observer: boolean }
   | { type: "game_started"; role: PlayerRole }
   | { type: "world_snapshot"; snapshot: WorldSnapshot }
   | { type: "meeting_started"; reportedBodyId: string }
   | { type: "vote_update"; votesCast: number; totalVoters: number }
+  | { type: "meeting_chat"; playerId: string; name: string; message: string; serverTime: number }
   | { type: "ejection_result"; playerId: string | null; wasImposter: boolean | null }
   | { type: "win"; winner: Faction; reason: string };

@@ -63,6 +63,7 @@ export async function createGameScene(
   network: NetworkClient,
   localPlayerId: string | null,
   initialRole: PlayerRole | null,
+  callbacks?: { onPhase: (phase: "meeting" | "ejected" | "noEjection" | "win") => void },
 ): Promise<Scene> {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
@@ -85,8 +86,8 @@ export async function createGameScene(
   };
 
   const offMessage = network.onMessage((message) => {
-    handleServerMessage(scene, players, bodies, message, localPlayerId, session);
-    updateHud(hud, session, localPlayerId, network);
+    handleServerMessage(scene, players, bodies, message, localPlayerId, session, callbacks);
+    updateHud(hud, session, players, localPlayerId, network);
   });
 
   const renderLoop = scene.onBeforeRenderObservable.add(() => {
@@ -104,7 +105,7 @@ export async function createGameScene(
     updateRenderTime(session, dt);
     interpolateRemotePlayers(players, localPlayerId, session.clientRenderTime);
     applySabotageVisuals(scene, players, session.latestSnapshot);
-    updateHud(hud, session, localPlayerId, network);
+    updateHud(hud, session, players, localPlayerId, network);
   });
 
   scene.onDisposeObservable.add(() => {
@@ -174,6 +175,7 @@ function handleServerMessage(
   message: ServerMessage,
   localPlayerId: string | null,
   session: SessionState,
+  callbacks?: { onPhase: (phase: "meeting" | "ejected" | "noEjection" | "win") => void },
 ) {
   switch (message.type) {
     case "welcome":
@@ -185,6 +187,7 @@ function handleServerMessage(
       break;
     case "meeting_started":
       session.notice = `Meeting started for body ${message.reportedBodyId.slice(0, 6)}`;
+      callbacks?.onPhase("meeting");
       break;
     case "vote_update":
       session.notice = `Votes: ${message.votesCast}/${message.totalVoters}`;
@@ -193,9 +196,11 @@ function handleServerMessage(
       session.notice = message.playerId
         ? `${message.playerId.slice(0, 6)} ejected${message.wasImposter ? " (imposter)" : ""}`
         : "No one was ejected";
+      callbacks?.onPhase(message.playerId ? "ejected" : "noEjection");
       break;
     case "win":
       session.notice = `${message.winner} win: ${message.reason}`;
+      callbacks?.onPhase("win");
       break;
     case "world_snapshot":
       handleSnapshot(scene, players, bodies, message.snapshot, localPlayerId, session);
@@ -245,7 +250,8 @@ function handleSnapshot(
     const bodyState = upsertBodyMesh(scene, bodies, body);
     bodyState.mesh.position.x = body.x;
     bodyState.mesh.position.z = body.z;
-    bodyState.mesh.isVisible = !body.reported;
+    // Keep bodies visible for consistency even after reported state flips.
+    bodyState.mesh.isVisible = true;
   }
 
   cleanupDisconnectedBodies(bodies, liveBodyIds);
@@ -528,13 +534,21 @@ function createHud(): HudState {
 function updateHud(
   hud: HudState,
   session: SessionState,
+  players: Map<string, PlayerMeshState>,
   localPlayerId: string | null,
   network: NetworkClient,
 ) {
   const snapshot = session.latestSnapshot;
   const localPlayer = snapshot?.players.find((player) => player.id === localPlayerId) ?? null;
-  const nearbyBody = snapshot && localPlayer ? findNearbyBody(localPlayer, snapshot.deadBodies) : null;
-  const nearbyTarget = snapshot && localPlayer ? findNearbyAliveTarget(localPlayer, snapshot.players) : null;
+  const localMesh = localPlayerId ? players.get(localPlayerId)?.mesh : undefined;
+  const localX = localMesh?.position.x ?? localPlayer?.x;
+  const localZ = localMesh?.position.z ?? localPlayer?.z;
+  const nearbyBody = snapshot && localPlayer && localX !== undefined && localZ !== undefined
+    ? findNearbyBody(localX, localZ, snapshot.deadBodies)
+    : null;
+  const nearbyTarget = snapshot && localPlayer && localX !== undefined && localZ !== undefined
+    ? findNearbyAliveTarget(localX, localZ, localPlayer.id, snapshot.players)
+    : null;
 
   hud.status.innerHTML = [
     `<strong>Phase:</strong> ${session.phase}`,
@@ -628,13 +642,13 @@ function renderMeetingHud(
   );
 }
 
-function findNearbyBody(player: SnapshotPlayer, bodies: SnapshotDeadBody[]) {
+function findNearbyBody(x: number, z: number, bodies: SnapshotDeadBody[]) {
   let best: SnapshotDeadBody | null = null;
   let bestDistSq = 16;
 
   for (const body of bodies) {
     if (body.reported) continue;
-    const distSq = distanceSq(player.x, player.z, body.x, body.z);
+    const distSq = distanceSq(x, z, body.x, body.z);
     if (distSq < bestDistSq) {
       best = body;
       bestDistSq = distSq;
@@ -644,13 +658,13 @@ function findNearbyBody(player: SnapshotPlayer, bodies: SnapshotDeadBody[]) {
   return best;
 }
 
-function findNearbyAliveTarget(player: SnapshotPlayer, players: SnapshotPlayer[]) {
+function findNearbyAliveTarget(x: number, z: number, playerId: string, players: SnapshotPlayer[]) {
   let best: SnapshotPlayer | null = null;
   let bestDistSq = 16;
 
   for (const candidate of players) {
-    if (candidate.id === player.id || candidate.state !== "alive") continue;
-    const distSq = distanceSq(player.x, player.z, candidate.x, candidate.z);
+    if (candidate.id === playerId || candidate.state !== "alive") continue;
+    const distSq = distanceSq(x, z, candidate.x, candidate.z);
     if (distSq < bestDistSq) {
       best = candidate;
       bestDistSq = distSq;

@@ -27,7 +27,9 @@ async function bootstrap() {
     });
   }
 
-  const app = new App(engine, canvas);
+  // Route the projector directly into server view when the URL asks for it.
+  const initialRoute = window.location.pathname.replace(/\/+$/, "") === "/server-view" ? "serverView" : "menu";
+  const app = new App(engine, canvas, initialRoute);
   await app.start();
 
   engine.runRenderLoop(() => {

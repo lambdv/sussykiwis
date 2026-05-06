@@ -9,6 +9,8 @@ pub mod model {
     pub enum ClientRequest {
         Join {
             name: Option<String>,
+            #[serde(default)]
+            spectator: bool,
         },
         Input {
             seq: u32,
@@ -27,6 +29,9 @@ pub mod model {
         },
         Vote {
             target: String,
+        },
+        MeetingChat {
+            message: String,
         },
         Sabotage {
             kind: SabotageKind,
@@ -52,6 +57,8 @@ pub mod model {
             tick_rate: u32,
             #[serde(rename = "moveSpeed")]
             move_speed: f32,
+            #[serde(rename = "observer")]
+            observer: bool,
         },
         GameStarted {
             role: PlayerRole,
@@ -68,6 +75,14 @@ pub mod model {
             votes_cast: usize,
             #[serde(rename = "totalVoters")]
             total_voters: usize,
+        },
+        MeetingChat {
+            #[serde(rename = "playerId")]
+            player_id: Uuid,
+            name: String,
+            message: String,
+            #[serde(rename = "serverTime")]
+            server_time: u64,
         },
         EjectionResult {
             #[serde(rename = "playerId")]
@@ -198,5 +213,23 @@ pub mod model {
         pub ends_at_tick: u64,
         pub votes_cast: usize,
         pub total_voters: usize,
+        pub vote_counts: Vec<MeetingVoteCount>,
+        pub chat: Vec<MeetingChatMessage>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MeetingVoteCount {
+        pub target: Option<Uuid>,
+        pub votes: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MeetingChatMessage {
+        pub player_id: Uuid,
+        pub name: String,
+        pub message: String,
+        pub server_time: u64,
     }
 }
