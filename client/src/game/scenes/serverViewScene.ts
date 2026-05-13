@@ -1,25 +1,33 @@
 import {
-  ArcRotateCamera,
-  Camera,
-  Color3,
-  Color4,
   Engine,
-  HemisphericLight,
   Mesh,
-  MeshBuilder,
   Scene,
   StandardMaterial,
-  Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { AdvancedDynamicTexture, Control, Image, Rectangle, StackPanel, TextBlock } from "@babylonjs/gui";
 import QRCode from "qrcode";
 import { NetworkClient } from "../../networking/client";
-import type { GamePhase, ServerMessage, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
+import { Logger, LOG_SCOPES } from "../../logger";
+import type { PuzzleProjectionState, ServerMessage, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
+import { drawTimerPuzzleScene } from "../puzzles/timerPuzzleScene";
+import { drawWiresPuzzleScene } from "../puzzles/wiresPuzzleScene";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
 import { createMeetingOverlay } from "../ui/meetingOverlay";
-
-const MAP_HALF_EXTENT = 60;
+import {
+  applyGrayPlayerTint,
+  applyWorldTheme,
+  createSharedWorldArena,
+  createSharedWorldCamera,
+  createWorldBodyMesh,
+  createWorldLight,
+  createWorldPuzzleStationMesh,
+  createWorldPlayerMesh,
+  DEFAULT_MAP_HALF_EXTENT,
+  getServerViewOrthoHalfHeight,
+  setMeshHeight,
+  type WorldPuzzleStationMesh,
+} from "../world";
 
 type PlayerMeshState = {
   mesh: Mesh;
@@ -31,6 +39,8 @@ type BodyMeshState = {
   mesh: Mesh;
   material: StandardMaterial;
 };
+
+type PuzzleStationMeshState = WorldPuzzleStationMesh;
 
 type ServerViewState = {
   connected: boolean;
@@ -57,21 +67,23 @@ type SceneMetadataState = {
 
 const SERVER_VIEW_AD_TEXT = "School of Engineering and Computer Sciense";
 const SERVER_VIEW_JOIN_URL = `${window.location.origin.replace(/\/$/, "")}/`;
-const SERVER_VIEW_ORTHO_HALF_HEIGHT = 70;
-
 export function createServerViewScene(
   engine: Engine | WebGPUEngine,
   network: NetworkClient,
 ): Scene {
   // Build a read-only scene that shows the whole world for spectators.
   const scene = new Scene(engine);
-  scene.clearColor = new Color4(0.07, 0.1, 0.13, 1);
 
-  createCamera(scene);
-  createEnvironment(scene);
+  const cameraState = createSharedWorldCamera(scene, {
+    name: "server-view-camera",
+    halfHeight: getServerViewOrthoHalfHeight(DEFAULT_MAP_HALF_EXTENT),
+  });
+  const arena = createEnvironment(scene);
+  applyWorldTheme(scene, arena, "lobby", []);
 
   const players = new Map<string, PlayerMeshState>();
   const bodies = new Map<string, BodyMeshState>();
+  const puzzleStations = new Map<string, PuzzleStationMeshState>();
   const hud = createHud(scene);
   const meetingOverlay = createMeetingOverlay({
     localPlayerId: null,
@@ -89,7 +101,7 @@ export function createServerViewScene(
 
   const offMessage = network.onMessage((message) => {
     // Keep the projector synchronized with every server snapshot and status event.
-    handleServerMessage(scene, players, bodies, hud, state, message);
+    handleServerMessage(scene, cameraState, arena, players, bodies, puzzleStations, hud, state, message);
   });
 
   scene.onDisposeObservable.add(() => {
@@ -108,8 +120,16 @@ export function createServerViewScene(
       body.material.dispose();
     }
 
+    for (const station of puzzleStations.values()) {
+      station.mesh.dispose();
+      station.material.dispose();
+      station.projectionMaterial.dispose();
+      station.projectionTexture.dispose();
+    }
+
     players.clear();
     bodies.clear();
+    puzzleStations.clear();
   });
 
   updateHud(hud, state);
@@ -119,69 +139,14 @@ export function createServerViewScene(
   return scene;
 }
 
-function createCamera(scene: Scene) {
-  // Lock the camera into a fixed orthographic isometric angle, zoomed out for full map.
-  const camera = new ArcRotateCamera(
-    "server-view-camera",
-    -Math.PI / 4,
-    0.95,
-    52,
-    Vector3.Zero(),
-    scene,
-  );
-  camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
-  camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
-  camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
-  scene.onBeforeRenderObservable.add(() => {
-    // Keep the world-space view size fixed so zoom does not change with screen size.
-    const engine = scene.getEngine();
-    const width = Math.max(1, engine.getRenderWidth());
-    const height = Math.max(1, engine.getRenderHeight());
-    const aspect = width / height;
-    const halfHeight = SERVER_VIEW_ORTHO_HALF_HEIGHT;
-    const halfWidth = halfHeight * aspect;
-    camera.orthoLeft = -halfWidth;
-    camera.orthoRight = halfWidth;
-    camera.orthoBottom = -halfHeight;
-    camera.orthoTop = halfHeight;
-  });
-  scene.activeCamera = camera;
-}
-
 function createEnvironment(scene: Scene) {
-  // Light the map evenly so the whole round stays readable on a large screen.
-  const light = new HemisphericLight("server-view-light", new Vector3(0, 1, 0), scene);
-  light.intensity = 1.1;
-
-  // Draw a simple arena that mirrors the authoritative server bounds.
-  const ground = MeshBuilder.CreateGround("server-view-ground", { width: MAP_HALF_EXTENT * 2, height: MAP_HALF_EXTENT * 2 }, scene);
-  const groundMaterial = new StandardMaterial("server-view-ground-material", scene);
-  groundMaterial.diffuseColor = Color3.FromHexString("#23313f");
-  ground.material = groundMaterial;
-
-  // Add perimeter walls so spectators can read the playable area at a glance.
-  const wallMaterial = new StandardMaterial("server-view-wall-material", scene);
-  wallMaterial.diffuseColor = Color3.FromHexString("#6ee7ff");
-  const wallThickness = 1.2;
-  const wallHeight = 3.5;
-  const edge = MAP_HALF_EXTENT + wallThickness / 2;
-  const full = MAP_HALF_EXTENT * 2 + wallThickness;
-
-  const north = MeshBuilder.CreateBox("server-view-wall-north", { width: full, height: wallHeight, depth: wallThickness }, scene);
-  north.position.set(0, wallHeight / 2, edge);
-  north.material = wallMaterial;
-
-  const south = MeshBuilder.CreateBox("server-view-wall-south", { width: full, height: wallHeight, depth: wallThickness }, scene);
-  south.position.set(0, wallHeight / 2, -edge);
-  south.material = wallMaterial;
-
-  const east = MeshBuilder.CreateBox("server-view-wall-east", { width: wallThickness, height: wallHeight, depth: full }, scene);
-  east.position.set(edge, wallHeight / 2, 0);
-  east.material = wallMaterial;
-
-  const west = MeshBuilder.CreateBox("server-view-wall-west", { width: wallThickness, height: wallHeight, depth: full }, scene);
-  west.position.set(-edge, wallHeight / 2, 0);
-  west.material = wallMaterial;
+  createWorldLight(scene);
+  return createSharedWorldArena(scene, {
+    prefix: "server-view",
+    groundColor: "#4f7d5c",
+    wallColor: "#ffd166",
+    initialMapHalfExtent: DEFAULT_MAP_HALF_EXTENT,
+  });
 }
 
 function createHud(scene: Scene): HudState {
@@ -287,8 +252,11 @@ function createHud(scene: Scene): HudState {
 
 function handleServerMessage(
   scene: Scene,
+  cameraState: ReturnType<typeof createSharedWorldCamera>,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   bodies: Map<string, BodyMeshState>,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
   hud: HudState,
   state: ServerViewState,
   message: ServerMessage,
@@ -340,13 +308,27 @@ function handleServerMessage(
       break;
 
     case "world_snapshot":
-      state.snapshot = message.snapshot;
-      state.status = formatSnapshotStatus(message.snapshot);
-      setSceneTheme(scene, message.snapshot.phase, message.snapshot.activeSabotages);
-      applySabotageVisuals(players, message.snapshot);
-      syncWorld(scene, players, bodies, message.snapshot);
-      updateHud(hud, state);
-      updateMeetingOverlay(scene, state);
+      {
+        const prevPhase = state.snapshot?.phase;
+        state.snapshot = message.snapshot;
+        state.status = formatSnapshotStatus(message.snapshot);
+
+        if (prevPhase !== message.snapshot.phase) {
+          Logger.info(LOG_SCOPES.STATE, "SERVER VIEW: phase change", {
+            from: prevPhase,
+            to: message.snapshot.phase,
+            playerCount: message.snapshot.players.length,
+          });
+        }
+
+        arena.updateBounds(message.snapshot.mapHalfExtent, message.snapshot.phase);
+        cameraState.setHalfHeight(getServerViewOrthoHalfHeight(message.snapshot.mapHalfExtent));
+        applyWorldTheme(scene, arena, message.snapshot.phase, message.snapshot.activeSabotages);
+        applySabotageVisuals(players, message.snapshot);
+        syncWorld(scene, players, bodies, puzzleStations, message.snapshot);
+        updateHud(hud, state);
+        updateMeetingOverlay(scene, state);
+      }
       break;
   }
 }
@@ -360,6 +342,11 @@ function updateMeetingOverlay(scene: Scene, state: ServerViewState) {
 function formatSnapshotStatus(snapshot: WorldSnapshot) {
   // Keep the projector headline short and useful while the match changes state.
   if (snapshot.phase === "lobby") {
+    if (snapshot.lobbyCountdownEndsAt !== null) {
+      const secondsLeft = Math.max(0, Math.ceil((snapshot.lobbyCountdownEndsAt - snapshot.serverTime) / 1000));
+      return `Lobby ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers} • ${secondsLeft}s`;
+    }
+
     return `Lobby ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`;
   }
 
@@ -374,27 +361,11 @@ function formatSnapshotStatus(snapshot: WorldSnapshot) {
       : "Live match";
 }
 
-function setSceneTheme(scene: Scene, phase: GamePhase, activeSabotages: WorldSnapshot["activeSabotages"]) {
-  // Change the background tint so spectators can see the state change instantly.
-  const lightsOff = activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
-  scene.clearColor =
-    lightsOff
-      ? new Color4(0.05, 0.07, 0.13, 1)
-      : phase === "lobby"
-      ? new Color4(0.07, 0.1, 0.13, 1)
-      : phase === "playing"
-        ? new Color4(0.08, 0.12, 0.09, 1)
-        : phase === "meeting"
-          ? new Color4(0.15, 0.11, 0.18, 1)
-          : phase === "ejection"
-            ? new Color4(0.18, 0.11, 0.08, 1)
-            : new Color4(0.1, 0.1, 0.1, 1);
-}
-
 function syncWorld(
   scene: Scene,
   players: Map<string, PlayerMeshState>,
   bodies: Map<string, BodyMeshState>,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
   snapshot: WorldSnapshot,
 ) {
   // Keep one mesh per player so the observer view always shows the full map.
@@ -404,7 +375,7 @@ function syncWorld(
     const meshState = upsertPlayer(scene, players, player);
     meshState.mesh.position.x = player.x;
     meshState.mesh.position.z = player.z;
-    meshState.mesh.position.y = player.state === "ghost" ? 3 : 2;
+    setMeshHeight(meshState.mesh, player.state);
   }
 
   cleanupPlayers(players, livePlayerIds);
@@ -415,26 +386,15 @@ function syncWorld(
     const meshState = upsertBody(scene, bodies, body);
     meshState.mesh.position.x = body.x;
     meshState.mesh.position.z = body.z;
-    meshState.mesh.position.y = 0.6;
     meshState.mesh.isVisible = !body.reported;
   }
 
   cleanupBodies(bodies, liveBodyIds);
+  syncPuzzleStations(scene, puzzleStations, snapshot);
 }
 
 function applySabotageVisuals(players: Map<string, PlayerMeshState>, snapshot: WorldSnapshot) {
-  // Mirror the gameplay scene tinting so the server view matches live match visibility.
-  const grayPlayers = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "gray_players");
-  const snapshotPlayers = new Map(snapshot.players.map((player) => [player.id, player]));
-
-  for (const [id, state] of players) {
-    const snapshotPlayer = snapshotPlayers.get(id);
-    if (!snapshotPlayer) continue;
-
-    state.material.diffuseColor = grayPlayers
-      ? Color3.FromHexString("#8e909a")
-      : safeColor(snapshotPlayer.color, Color3.FromHexString("#94a3b8"));
-  }
+  applyGrayPlayerTint(players, snapshot.players, snapshot.activeSabotages);
 }
 
 function upsertPlayer(scene: Scene, players: Map<string, PlayerMeshState>, player: SnapshotPlayer) {
@@ -442,14 +402,7 @@ function upsertPlayer(scene: Scene, players: Map<string, PlayerMeshState>, playe
   if (state) return state;
 
   // Render each player as a color-coded marker that reads clearly from far away.
-  const mesh = MeshBuilder.CreateCylinder(
-    `server-view-player-${player.id}`,
-    { diameterTop: 2.2, diameterBottom: 2.2, height: 1.2, tessellation: 20 },
-    scene,
-  );
-  const material = new StandardMaterial(`server-view-player-material-${player.id}`, scene);
-  material.diffuseColor = safeColor(player.color, Color3.FromHexString("#94a3b8"));
-  mesh.material = material;
+  const { mesh, material } = createWorldPlayerMesh(scene, `server-view-player-${player.id}`, player.color);
 
   const tag = createPlayerTag(scene, player.id, player.name);
   tag.mesh.parent = mesh;
@@ -464,10 +417,7 @@ function upsertBody(scene: Scene, bodies: Map<string, BodyMeshState>, body: Snap
   if (state) return state;
 
   // Draw reported bodies as small red markers so the audience can track meetings.
-  const mesh = MeshBuilder.CreateBox(`server-view-body-${body.id}`, { size: 1.2 }, scene);
-  const material = new StandardMaterial(`server-view-body-material-${body.id}`, scene);
-  material.diffuseColor = Color3.FromHexString("#ef4444");
-  mesh.material = material;
+  const { mesh, material } = createWorldBodyMesh(scene, `server-view-body-${body.id}`);
 
   state = { mesh, material };
   bodies.set(body.id, state);
@@ -495,6 +445,83 @@ function cleanupBodies(bodies: Map<string, BodyMeshState>, liveIds: Set<string>)
     state.material.dispose();
     bodies.delete(id);
   }
+}
+
+function syncPuzzleStations(
+  scene: Scene,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+  snapshot: WorldSnapshot,
+) {
+  // Keep lobby snapshots free of task pedestals so the projector only shows them once the round is live.
+  if (snapshot.subState !== "in_game") {
+    for (const [id, state] of puzzleStations) {
+      state.mesh.dispose();
+      state.material.dispose();
+      state.projectionMaterial.dispose();
+      state.projectionTexture.dispose();
+      puzzleStations.delete(id);
+    }
+
+    return;
+  }
+
+  // Mirror the same station/projection state to the read-only server projector.
+  const liveIds = new Set<string>();
+  const requiredCompletions = snapshot.players.filter(isTaskPlayer).length;
+  for (const station of snapshot.puzzleStations) {
+    liveIds.add(station.id);
+    const meshState = upsertPuzzleStation(scene, puzzleStations, station.id, station.kind);
+    meshState.mesh.position.x = station.x;
+    meshState.mesh.position.z = station.z;
+    meshState.setStatus(requiredCompletions > 0 && station.completedBy.length >= requiredCompletions, station.occupiedBy !== null);
+    drawPuzzleProjection(meshState, station.projection);
+  }
+
+  for (const [id, state] of puzzleStations) {
+    if (liveIds.has(id)) continue;
+    state.mesh.dispose();
+    state.material.dispose();
+    state.projectionMaterial.dispose();
+    state.projectionTexture.dispose();
+    puzzleStations.delete(id);
+  }
+}
+
+function upsertPuzzleStation(
+  scene: Scene,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+  stationId: string,
+  kind: WorldSnapshot["puzzleStations"][number]["kind"],
+) {
+  const existing = puzzleStations.get(stationId);
+  if (existing) {
+    return existing;
+  }
+
+  const meshState = createWorldPuzzleStationMesh(scene, `server-view-puzzle-${stationId}`, kind);
+  puzzleStations.set(stationId, meshState);
+  return meshState;
+}
+
+function drawPuzzleProjection(meshState: PuzzleStationMeshState, projection: PuzzleProjectionState | null) {
+  const context = meshState.projectionTexture.getContext() as unknown as CanvasRenderingContext2D | null;
+  if (!projection || !context) {
+    meshState.projectionMesh.isVisible = false;
+    return;
+  }
+
+  if (projection.kind === "timer") {
+    drawTimerPuzzleScene(context, 1024, 1024, projection);
+  } else {
+    drawWiresPuzzleScene(context, 1024, 1024, projection, { fromIndex: null, pointerX: 0, pointerY: 0 });
+  }
+
+  meshState.projectionMesh.isVisible = true;
+  meshState.projectionTexture.update(false);
+}
+
+function isTaskPlayer(player: WorldSnapshot["players"][number]) {
+  return player.role === "crewmate" || player.role === "sheriff";
 }
 
 function updateHud(hud: HudState, state: ServerViewState) {
@@ -570,12 +597,4 @@ async function updateQr(hud: HudState) {
 
   hud.qrImage.source = dataUrl;
   hud.qrAdvert.text = SERVER_VIEW_AD_TEXT;
-}
-
-function safeColor(value: string, fallback: Color3) {
-  try {
-    return Color3.FromHexString(value);
-  } catch {
-    return fallback;
-  }
 }

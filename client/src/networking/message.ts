@@ -10,6 +10,29 @@ export type Faction = "crew" | "imposters";
 
 export type SabotageKind = "lights_off" | "gray_players";
 
+export type PuzzleKind = "timer" | "wires";
+
+export type WireColor = "red" | "blue" | "yellow" | "green";
+
+export type WireConnection = {
+  fromIndex: number;
+  toIndex: number;
+};
+
+export type PuzzleProjectionState =
+  | { kind: "timer"; dialAngle: number; targetStart: number; targetSize: number }
+  | { kind: "wires"; leftColors: WireColor[]; rightColors: WireColor[]; connectedPairs: WireConnection[] };
+
+export type PuzzleStationSnapshot = {
+  id: string;
+  kind: PuzzleKind;
+  x: number;
+  z: number;
+  occupiedBy: string | null;
+  completedBy: string[];
+  projection: PuzzleProjectionState | null;
+};
+
 export type ClientMessage =
   | { type: "join"; name?: string; spectator?: boolean }
   | { type: "input"; seq: number; moveX: number; moveY: number }
@@ -18,6 +41,10 @@ export type ClientMessage =
   | { type: "vote"; target: string }
   | { type: "meeting_chat"; message: string }
   | { type: "sabotage"; kind: SabotageKind }
+  | { type: "start_puzzle"; stationId: string }
+  | { type: "cancel_puzzle" }
+  | { type: "puzzle_tap" }
+  | { type: "puzzle_connect"; fromIndex: number; toIndex: number }
   | {
       type: "client_log";
       scope: string;
@@ -46,7 +73,10 @@ export type SnapshotPlayer = {
   x: number;
   z: number;
   state: PlayerState;
+  killCooldownEndsAt: number;
   lastProcessedSeq: number;
+  completedPuzzleCount: number;
+  totalPuzzleCount: number;
 };
 
 export type SnapshotDeadBody = {
@@ -85,8 +115,11 @@ export type WorldSnapshot = {
   subState: GameSubState;
   joinedPlayers: number;
   expectedPlayers: number;
+  mapHalfExtent: number;
+  lobbyCountdownEndsAt: number | null;
   players: SnapshotPlayer[];
   deadBodies: SnapshotDeadBody[];
+  puzzleStations: PuzzleStationSnapshot[];
   activeSabotages: ActiveSabotage[];
   meeting: MeetingSnapshot | null;
   win: WinState | null;

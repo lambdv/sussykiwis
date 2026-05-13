@@ -1,25 +1,28 @@
 import nipplejs from "nipplejs";
 import {
   ArcRotateCamera,
-  Camera,
-  Color3,
   Color4,
   Engine,
-  HemisphericLight,
   Mesh,
-  MeshBuilder,
   Scene,
   StandardMaterial,
-  Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { NetworkClient } from "../../networking/client";
 import type { PlayerRole, ServerMessage, SnapshotPlayer, WorldSnapshot } from "../../networking/message";
 import { cameraRelativeMovement } from "../cameraMovement";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
-
-const MOVE_SPEED = 6.0;
-const MAP_HALF_EXTENT = 60;
+import {
+  applyWorldTheme,
+  clampPositionToPhaseBounds,
+  createSharedWorldArena,
+  createSharedWorldCamera,
+  createWorldLight,
+  createWorldPlayerMesh,
+  DEFAULT_MAP_HALF_EXTENT,
+  getSnapshotMapHalfExtent,
+  setMeshHeight,
+} from "../world";
 
 type RemoteSnapshot = { time: number; x: number; z: number };
 
@@ -36,12 +39,12 @@ type SessionState = {
   latestServerTime: number;
   clientRenderTime: number;
   pendingInputs: PendingInput[];
+  moveSpeed: number;
   latestSnapshot: WorldSnapshot | null;
   localPlayerId: string | null;
   localRole: PlayerRole | null;
   notice: string;
   countdownEndsAt: number | null;
-  countdownTimer: number | null;
 };
 
 type PreMatchHud = {
@@ -60,8 +63,9 @@ export async function createPreMatchScene(
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.6, 0.8, 0.95, 1);
 
-  const camera = createCamera(scene, canvas);
-  createEnvironment(scene);
+  const { camera } = createSharedWorldCamera(scene, { name: "prematch-camera", canvas, halfHeight: 28 });
+  const arena = createEnvironment(scene);
+  applyWorldTheme(scene, arena, "lobby", []);
 
   const players = new Map<string, PlayerMeshState>();
   const controller = setupPlayerController();
@@ -70,17 +74,17 @@ export async function createPreMatchScene(
     latestServerTime: 0,
     clientRenderTime: 0,
     pendingInputs: [],
+    moveSpeed: network.getMoveSpeed(),
     latestSnapshot: null,
     localPlayerId,
     localRole: null,
     notice: "Waiting for players",
     countdownEndsAt: null,
-    countdownTimer: null,
   };
 
   const offMessage = network.onMessage((message) => {
     // Keep this scene in sync with world snapshots and auto-enter match when ready.
-    handleServerMessage(scene, players, message, localPlayerId, session, callbacks);
+    handleServerMessage(scene, arena, players, message, localPlayerId, session, callbacks);
     updatePreMatchHud(hud, session);
   });
 
@@ -99,9 +103,6 @@ export async function createPreMatchScene(
     controller.dispose();
     offMessage();
     scene.onBeforeRenderObservable.remove(renderLoop);
-    if (session.countdownTimer !== null) {
-      window.clearTimeout(session.countdownTimer);
-    }
     hud.root.remove();
     for (const player of players.values()) {
       player.mesh.dispose();
@@ -113,69 +114,19 @@ export async function createPreMatchScene(
   return scene;
 }
 
-function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
-  // Reuse the same fixed gameplay camera angle with orthographic projection.
-  const camera = new ArcRotateCamera("prematch-camera", -Math.PI / 4, 0.95, 52, Vector3.Zero(), scene);
-  camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
-  camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
-  camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
-  scene.onBeforeRenderObservable.add(() => {
-    // Keep ortho bounds aligned with canvas aspect so scale is stable.
-    const engine = scene.getEngine();
-    const width = Math.max(1, engine.getRenderWidth());
-    const height = Math.max(1, engine.getRenderHeight());
-    const aspect = width / height;
-    const halfHeight = 28;
-    const halfWidth = halfHeight * aspect;
-    camera.orthoLeft = -halfWidth;
-    camera.orthoRight = halfWidth;
-    camera.orthoBottom = -halfHeight;
-    camera.orthoTop = halfHeight;
-  });
-  camera.attachControl(canvas, true);
-  camera.inputs.clear();
-  return camera;
-}
-
 function createEnvironment(scene: Scene) {
-  // Light the map brightly so edge walls are always readable on mobile.
-  const light = new HemisphericLight("prematch-light", new Vector3(0, 1, 0.2), scene);
-  light.intensity = 1.1;
-
-  // Create the requested square world plane for pre-match movement.
-  const groundSize = MAP_HALF_EXTENT * 2;
-  const ground = MeshBuilder.CreateGround("prematch-ground", { width: groundSize, height: groundSize }, scene);
-  const groundMaterial = new StandardMaterial("prematch-ground-material", scene);
-  groundMaterial.diffuseColor = Color3.FromHexString("#4f7d5c");
-  ground.material = groundMaterial;
-
-  // Add visible collision walls around the plane perimeter.
-  const wallMaterial = new StandardMaterial("prematch-wall-material", scene);
-  wallMaterial.diffuseColor = Color3.FromHexString("#ffd166");
-  const wallThickness = 1.2;
-  const wallHeight = 3.5;
-  const edge = MAP_HALF_EXTENT + wallThickness / 2;
-  const full = MAP_HALF_EXTENT * 2 + wallThickness;
-
-  const north = MeshBuilder.CreateBox("prematch-wall-north", { width: full, height: wallHeight, depth: wallThickness }, scene);
-  north.position.set(0, wallHeight / 2, edge);
-  north.material = wallMaterial;
-
-  const south = MeshBuilder.CreateBox("prematch-wall-south", { width: full, height: wallHeight, depth: wallThickness }, scene);
-  south.position.set(0, wallHeight / 2, -edge);
-  south.material = wallMaterial;
-
-  const east = MeshBuilder.CreateBox("prematch-wall-east", { width: wallThickness, height: wallHeight, depth: full }, scene);
-  east.position.set(edge, wallHeight / 2, 0);
-  east.material = wallMaterial;
-
-  const west = MeshBuilder.CreateBox("prematch-wall-west", { width: wallThickness, height: wallHeight, depth: full }, scene);
-  west.position.set(-edge, wallHeight / 2, 0);
-  west.material = wallMaterial;
+  createWorldLight(scene);
+  return createSharedWorldArena(scene, {
+    prefix: "prematch",
+    groundColor: "#4f7d5c",
+    wallColor: "#ffd166",
+    initialMapHalfExtent: DEFAULT_MAP_HALF_EXTENT,
+  });
 }
 
 function handleServerMessage(
   scene: Scene,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   message: ServerMessage,
   localPlayerId: string | null,
@@ -193,7 +144,7 @@ function handleServerMessage(
     return;
   }
 
-  handleSnapshot(scene, players, message.snapshot, localPlayerId, session);
+  handleSnapshot(scene, arena, players, message.snapshot, localPlayerId, session);
 
   // Switch scenes as soon as the authoritative server says the round is live.
   if (message.snapshot.subState === "in_game") {
@@ -202,16 +153,12 @@ function handleServerMessage(
     return;
   }
 
-  // Start a short countdown once the lobby fills, then enter the match.
-  if (message.snapshot.joinedPlayers >= message.snapshot.expectedPlayers) {
-    startCountdown(session, callbacks);
-  } else {
-    cancelCountdown(session);
-  }
+  syncCountdown(session, message.snapshot);
 }
 
 function handleSnapshot(
   scene: Scene,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   snapshot: WorldSnapshot,
   localPlayerId: string | null,
@@ -219,6 +166,8 @@ function handleSnapshot(
 ) {
   session.latestSnapshot = snapshot;
   session.latestServerTime = Math.max(session.latestServerTime, snapshot.serverTime);
+  arena.updateBounds(snapshot.mapHalfExtent, snapshot.phase);
+  applyWorldTheme(scene, arena, snapshot.phase, snapshot.activeSabotages);
 
   if (!session.localRole && session.localPlayerId) {
     const localPlayer = snapshot.players.find((player) => player.id === session.localPlayerId);
@@ -229,7 +178,7 @@ function handleSnapshot(
   }
 
   if (session.countdownEndsAt === null && !session.localRole) {
-    session.notice = `Waiting for players: ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`;
+    session.notice = `Game starts when ${snapshot.expectedPlayers - snapshot.joinedPlayers} more players join`;
   }
 
   const livePlayerIds = new Set<string>();
@@ -238,7 +187,7 @@ function handleSnapshot(
     const state = upsertPlayerMesh(scene, players, snapshotPlayer);
 
     if (snapshotPlayer.id === localPlayerId) {
-      reconcileLocalPlayer(state, snapshotPlayer, session.pendingInputs);
+      reconcileLocalPlayer(state, snapshotPlayer, session.pendingInputs, session.moveSpeed, snapshot.mapHalfExtent);
     } else {
       state.snapshots.push({
         time: snapshot.serverTime,
@@ -251,7 +200,7 @@ function handleSnapshot(
       }
     }
 
-    state.mesh.position.y = snapshotPlayer.state === "ghost" ? 3 : 2;
+    setMeshHeight(state.mesh, snapshotPlayer.state);
   }
 
   cleanupDisconnectedPlayers(players, livePlayerIds);
@@ -268,15 +217,23 @@ function handleLocalPlayerMovement(
 ) {
   // Apply local prediction in pre-match so movement feels responsive.
   const input = controller.getInput();
+  const seq = network.nextInputSeq();
   const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
   const ix = movement.x;
   const iz = movement.z;
   const localState = localPlayerId ? players.get(localPlayerId) : undefined;
 
   if (localPlayerId && localState) {
-    localState.mesh.position.x = clampToMap(localState.mesh.position.x + ix * MOVE_SPEED * dt);
-    localState.mesh.position.z = clampToMap(localState.mesh.position.z + iz * MOVE_SPEED * dt);
-    session.pendingInputs.push({ seq: input.seq, moveX: ix, moveZ: iz, dt });
+    const mapHalfExtent = getSnapshotMapHalfExtent(session.latestSnapshot);
+    const clamped = clampPositionToPhaseBounds(
+      localState.mesh.position.x + ix * session.moveSpeed * dt,
+      localState.mesh.position.z + iz * session.moveSpeed * dt,
+      mapHalfExtent,
+      "lobby",
+    );
+    localState.mesh.position.x = clamped.x;
+    localState.mesh.position.z = clamped.z;
+    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt });
     if (session.pendingInputs.length > 120) {
       session.pendingInputs.shift();
     }
@@ -289,18 +246,19 @@ function handleLocalPlayerMovement(
 
   network.sendMessage({
     type: "input",
-    seq: input.seq,
+    seq,
     moveX: ix,
     moveY: iz,
   });
 }
 
-function clampToMap(value: number) {
-  // Match local clamping with server authority bounds for smoother edges.
-  return Math.max(-MAP_HALF_EXTENT, Math.min(MAP_HALF_EXTENT, value));
-}
-
-function reconcileLocalPlayer(state: PlayerMeshState, snapshotPlayer: SnapshotPlayer, pendingInputs: PendingInput[]) {
+function reconcileLocalPlayer(
+  state: PlayerMeshState,
+  snapshotPlayer: SnapshotPlayer,
+  pendingInputs: PendingInput[],
+  moveSpeed: number,
+  mapHalfExtent: number,
+) {
   // Reconcile local prediction against authoritative server input acknowledgements.
   let targetX = snapshotPlayer.x;
   let targetZ = snapshotPlayer.z;
@@ -310,12 +268,13 @@ function reconcileLocalPlayer(state: PlayerMeshState, snapshotPlayer: SnapshotPl
   }
 
   for (const input of pendingInputs) {
-    targetX += input.moveX * MOVE_SPEED * input.dt;
-    targetZ += input.moveZ * MOVE_SPEED * input.dt;
+    targetX += input.moveX * moveSpeed * input.dt;
+    targetZ += input.moveZ * moveSpeed * input.dt;
   }
 
-  const clampedX = clampToMap(targetX);
-  const clampedZ = clampToMap(targetZ);
+  const clamped = clampPositionToPhaseBounds(targetX, targetZ, mapHalfExtent, "lobby");
+  const clampedX = clamped.x;
+  const clampedZ = clamped.z;
   const dx = clampedX - state.mesh.position.x;
   const dz = clampedZ - state.mesh.position.z;
   const distSq = dx * dx + dz * dz;
@@ -390,10 +349,7 @@ function upsertPlayerMesh(
     return existing;
   }
 
-  const mesh = MeshBuilder.CreateSphere(`prematch-player-${snapshotPlayer.id}`, { diameter: 2.6 }, scene);
-  const material = new StandardMaterial(`prematch-player-material-${snapshotPlayer.id}`, scene);
-  material.diffuseColor = Color3.FromHexString(snapshotPlayer.color);
-  mesh.material = material;
+  const { mesh, material } = createWorldPlayerMesh(scene, `prematch-player-${snapshotPlayer.id}`, snapshotPlayer.color);
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
 
   const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
@@ -450,35 +406,24 @@ function updatePreMatchHud(hud: PreMatchHud, session: SessionState) {
   hud.status.textContent = session.notice;
 }
 
-function startCountdown(session: SessionState, _callbacks: { onMatchReady: () => void }) {
-  // Only start one countdown per full lobby.
-  if (session.countdownEndsAt !== null) return;
-
-  const durationMs = 5000;
-  session.countdownEndsAt = Date.now() + durationMs;
-  session.notice = "Match starting in 5";
-  session.countdownTimer = window.setTimeout(() => {
-    session.countdownTimer = null;
-    session.countdownEndsAt = null;
-    // Wait for the authoritative in-game snapshot instead of transitioning locally.
-    session.notice = "Waiting for server to start match";
-  }, durationMs);
-}
-
 function cancelCountdown(session: SessionState) {
   // Stop the countdown if the lobby is no longer full.
-  if (session.countdownTimer !== null) {
-    window.clearTimeout(session.countdownTimer);
-    session.countdownTimer = null;
+  session.countdownEndsAt = null;
+  const snapshot = session.latestSnapshot;
+  session.notice = snapshot
+    ? `Game starts when ${snapshot.expectedPlayers - snapshot.joinedPlayers} more players join`
+    : "Waiting for players";
+}
+
+function syncCountdown(session: SessionState, snapshot: WorldSnapshot) {
+  // Mirror the server-owned lobby countdown so every client sees the same start time.
+  if (snapshot.lobbyCountdownEndsAt === null) {
+    cancelCountdown(session);
+    return;
   }
 
-  if (session.countdownEndsAt !== null) {
-    session.countdownEndsAt = null;
-    const snapshot = session.latestSnapshot;
-    session.notice = snapshot
-      ? `Waiting for players: ${snapshot.joinedPlayers} / ${snapshot.expectedPlayers}`
-      : "Waiting for players";
-  }
+  session.countdownEndsAt = snapshot.lobbyCountdownEndsAt;
+  updateCountdown(session);
 }
 
 function formatRoleName(role: PlayerRole) {
@@ -490,7 +435,8 @@ function updateCountdown(session: SessionState) {
   // Refresh the displayed countdown every frame so it stays in sync.
   if (session.countdownEndsAt === null) return;
 
-  const secondsLeft = Math.max(0, Math.ceil((session.countdownEndsAt - Date.now()) / 1000));
+  const serverTime = session.latestSnapshot?.serverTime ?? session.latestServerTime;
+  const secondsLeft = Math.max(0, Math.ceil((session.countdownEndsAt - serverTime) / 1000));
   session.notice = `Match starting in ${secondsLeft}`;
 }
 
@@ -498,7 +444,6 @@ function setupPlayerController() {
   // Merge keyboard and joystick movement into one normalized input vector.
   const keys = new Set<string>();
   const joy = { x: 0, y: 0 };
-  let seq = 0;
 
   const onKeyDown = (event: KeyboardEvent) => keys.add(event.key);
   const onKeyUp = (event: KeyboardEvent) => keys.delete(event.key);
@@ -648,8 +593,7 @@ function setupPlayerController() {
         inputZ = 0;
       }
 
-      seq += 1;
-      return { x: inputX, z: inputZ, seq };
+      return { x: inputX, z: inputZ };
     },
     dispose() {
       window.removeEventListener("keydown", onKeyDown);

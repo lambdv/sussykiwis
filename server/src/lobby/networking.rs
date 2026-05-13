@@ -36,6 +36,18 @@ pub mod model {
         Sabotage {
             kind: SabotageKind,
         },
+        StartPuzzle {
+            #[serde(rename = "stationId")]
+            station_id: Uuid,
+        },
+        CancelPuzzle,
+        PuzzleTap,
+        PuzzleConnect {
+            #[serde(rename = "fromIndex")]
+            from_index: usize,
+            #[serde(rename = "toIndex")]
+            to_index: usize,
+        },
         ClientLog {
             scope: String,
             event: String,
@@ -157,6 +169,62 @@ pub mod model {
         GrayPlayers,
     }
 
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PuzzleKind {
+        Timer,
+        Wires,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WireColor {
+        Red,
+        Blue,
+        Yellow,
+        Green,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WireConnection {
+        pub from_index: usize,
+        pub to_index: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum PuzzleProjectionState {
+        Timer {
+            #[serde(rename = "dialAngle")]
+            dial_angle: f32,
+            #[serde(rename = "targetStart")]
+            target_start: f32,
+            #[serde(rename = "targetSize")]
+            target_size: f32,
+        },
+        Wires {
+            #[serde(rename = "leftColors")]
+            left_colors: Vec<WireColor>,
+            #[serde(rename = "rightColors")]
+            right_colors: Vec<WireColor>,
+            #[serde(rename = "connectedPairs")]
+            connected_pairs: Vec<WireConnection>,
+        },
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PuzzleStationSnapshot {
+        pub id: Uuid,
+        pub kind: PuzzleKind,
+        pub x: f32,
+        pub z: f32,
+        pub occupied_by: Option<Uuid>,
+        pub completed_by: Vec<Uuid>,
+        pub projection: Option<PuzzleProjectionState>,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct WorldSnapshot {
@@ -166,8 +234,11 @@ pub mod model {
         pub sub_state: GameSubState,
         pub joined_players: usize,
         pub expected_players: usize,
+        pub map_half_extent: f32,
+        pub lobby_countdown_ends_at: Option<u64>,
         pub players: Vec<SnapshotPlayer>,
         pub dead_bodies: Vec<SnapshotDeadBody>,
+        pub puzzle_stations: Vec<PuzzleStationSnapshot>,
         pub active_sabotages: Vec<ActiveSabotage>,
         pub meeting: Option<MeetingSnapshot>,
         pub win: Option<WinMessage>,
@@ -184,7 +255,10 @@ pub mod model {
         pub x: f32,
         pub z: f32,
         pub state: PlayerState,
+        pub kill_cooldown_ends_at: u64,
         pub last_processed_seq: u32,
+        pub completed_puzzle_count: usize,
+        pub total_puzzle_count: usize,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

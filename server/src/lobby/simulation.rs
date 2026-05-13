@@ -1,5 +1,6 @@
 /// Simulates the authoritative game world.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::f32::consts::TAU;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc};
@@ -9,15 +10,21 @@ use uuid::Uuid;
 
 use crate::lobby::networking::model::{
     ActiveSabotage, Faction, GamePhase, GameSubState, MeetingChatMessage, MeetingSnapshot,
-    MeetingVoteCount, PlayerRole, PlayerState, SabotageKind, ServerEvent, ServerResponse,
-    SnapshotDeadBody, SnapshotPlayer, WinMessage, WorldSnapshot,
+    MeetingVoteCount, PlayerRole, PlayerState, PuzzleKind, PuzzleProjectionState,
+    PuzzleStationSnapshot, SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody,
+    SnapshotPlayer, WinMessage, WireColor, WireConnection, WorldSnapshot,
 };
 
 const MIN_PLAYERS: usize = 4;
 const KILL_RANGE: f32 = 4.0;
 const REPORT_RANGE: f32 = 4.0;
+const PUZZLE_RANGE: f32 = 4.5;
 pub const TICK_RATE: u32 = 20;
 pub const MOVE_SPEED: f32 = 10.0;
+const LOBBY_COUNTDOWN_SECONDS: u64 = 30;
+const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
+const TIMER_TARGET_SIZE: f32 = 0.8;
+const TIMER_ROTATION_PER_TICK: f32 = 0.28;
 
 pub async fn start_simulation(
     mut game_rx: mpsc::Receiver<GameCommand>,
@@ -75,6 +82,21 @@ pub enum GameCommand {
         id: Uuid,
         kind: SabotageKind,
     },
+    StartPuzzle {
+        id: Uuid,
+        station_id: Uuid,
+    },
+    CancelPuzzle {
+        id: Uuid,
+    },
+    PuzzleTap {
+        id: Uuid,
+    },
+    PuzzleConnect {
+        id: Uuid,
+        from_index: usize,
+        to_index: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -90,6 +112,41 @@ struct Player {
     role: PlayerRole,
     state: PlayerState,
     kill_cooldown_ends_at_tick: u64,
+    completed_puzzle_station_ids: HashSet<Uuid>,
+}
+
+#[derive(Clone)]
+struct PuzzleStation {
+    id: Uuid,
+    kind: PuzzleKind,
+    x: f32,
+    z: f32,
+    occupant: Option<PuzzleOccupant>,
+}
+
+#[derive(Clone)]
+struct PuzzleOccupant {
+    player_id: Uuid,
+    state: ActivePuzzleState,
+}
+
+#[derive(Clone)]
+enum ActivePuzzleState {
+    Timer(TimerPuzzleState),
+    Wires(WiresPuzzleState),
+}
+
+#[derive(Clone)]
+struct TimerPuzzleState {
+    started_at_tick: u64,
+    target_start: f32,
+}
+
+#[derive(Clone)]
+struct WiresPuzzleState {
+    left_colors: [WireColor; 4],
+    right_colors: [WireColor; 4],
+    connected_pairs: Vec<WireConnection>,
 }
 
 #[derive(Clone)]
@@ -127,9 +184,11 @@ pub struct World {
     players: HashMap<Uuid, Player>,
     join_order: Vec<Uuid>,
     dead_bodies: HashMap<Uuid, DeadBody>,
+    puzzle_stations: Vec<PuzzleStation>,
     active_sabotages: Vec<ActiveSabotage>,
     phase: GamePhase,
     round_locked: bool,
+    lobby_countdown_ends_at_tick: Option<u64>,
     meeting: Option<MeetingState>,
     ejection: Option<EjectionState>,
     win: Option<WinMessage>,
@@ -146,16 +205,18 @@ impl World {
             players: HashMap::new(),
             join_order: Vec::new(),
             dead_bodies: HashMap::new(),
+            puzzle_stations: create_puzzle_stations(),
             active_sabotages: Vec::new(),
             phase: GamePhase::Lobby,
             round_locked: false,
+            lobby_countdown_ends_at_tick: None,
             meeting: None,
             ejection: None,
             win: None,
             tick: 0,
             tick_rate: TICK_RATE,
             move_speed: MOVE_SPEED,
-            map_half_extent: 60.0,
+            map_half_extent: 30.0,
             event_tx,
         }
     }
@@ -176,14 +237,20 @@ impl World {
 
                 player.x += player.move_x * self.move_speed * dt;
                 player.z += player.move_z * self.move_speed * dt;
-                player.x = player.x.clamp(-self.map_half_extent, self.map_half_extent);
-                player.z = player.z.clamp(-self.map_half_extent, self.map_half_extent);
+                (player.x, player.z) = clamp_position_to_phase_bounds(
+                    player.x,
+                    player.z,
+                    self.map_half_extent,
+                    self.phase,
+                );
             }
         }
 
         self.expire_sabotages();
+        self.sync_puzzle_sessions();
         self.advance_meeting_if_needed();
         self.advance_ejection_if_needed();
+        self.try_start_match();
 
         debug!(
             tick = self.tick,
@@ -209,6 +276,14 @@ impl World {
             GameCommand::Vote { id, target } => self.handle_vote(id, target),
             GameCommand::MeetingChat { id, message } => self.handle_meeting_chat(id, message),
             GameCommand::Sabotage { id, kind } => self.handle_sabotage(id, kind),
+            GameCommand::StartPuzzle { id, station_id } => self.handle_start_puzzle(id, station_id),
+            GameCommand::CancelPuzzle { id } => self.release_puzzle_for_player(id),
+            GameCommand::PuzzleTap { id } => self.handle_puzzle_tap(id),
+            GameCommand::PuzzleConnect {
+                id,
+                from_index,
+                to_index,
+            } => self.handle_puzzle_connect(id, from_index, to_index),
         }
     }
 
@@ -229,6 +304,7 @@ impl World {
             role: PlayerRole::Crewmate,
             state: PlayerState::Alive,
             kill_cooldown_ends_at_tick: 0,
+            completed_puzzle_station_ids: HashSet::new(),
         };
 
         self.players.insert(id, player);
@@ -260,6 +336,7 @@ impl World {
     fn handle_leave(&mut self, id: Uuid) {
         self.players.remove(&id);
         self.join_order.retain(|player_id| *player_id != id);
+        self.release_puzzle_for_player(id);
 
         // Drop votes from disconnected players so meetings can still resolve.
         if let Some(meeting) = self.meeting.as_mut() {
@@ -363,6 +440,15 @@ impl World {
             },
         );
 
+        info!(
+            tick = self.tick,
+            killer_id = %id,
+            victim_id = %target_id,
+            victim_role = ?target.role,
+            body_id = %body_id,
+            "SERVER STATE: player killed"
+        );
+
         self.check_win_condition();
     }
 
@@ -406,6 +492,14 @@ impl World {
             player.move_x = 0.0;
             player.move_z = 0.0;
         }
+
+        info!(
+            tick = self.tick,
+            phase = ?self.phase,
+            reported_by = %id,
+            body_id = %body_id,
+            "SERVER STATE TRANSITION: meeting started"
+        );
 
         let _ = self
             .event_tx
@@ -523,6 +617,187 @@ impl World {
         });
     }
 
+    fn handle_start_puzzle(&mut self, id: Uuid, station_id: Uuid) {
+        if !matches!(self.phase, GamePhase::Playing) || self.active_station_for_player(id).is_some() {
+            return;
+        }
+
+        let Some(player) = self.players.get(&id).cloned() else {
+            return;
+        };
+
+        // Only crew-side players may work tasks, and only while close enough to the station.
+        if !can_work_puzzles(&player)
+            || player.completed_puzzle_station_ids.contains(&station_id)
+            || player.completed_puzzle_station_ids.len() >= TOTAL_PUZZLES_PER_PLAYER
+        {
+            return;
+        }
+
+        let Some(station) = self.puzzle_stations.iter_mut().find(|station| station.id == station_id) else {
+            return;
+        };
+
+        if station.occupant.is_some()
+            || distance_sq(player.x, player.z, station.x, station.z) > PUZZLE_RANGE * PUZZLE_RANGE
+        {
+            return;
+        }
+
+        // Start a fresh authoritative puzzle session for this player at this station.
+        station.occupant = Some(PuzzleOccupant {
+            player_id: id,
+            state: match station.kind {
+                PuzzleKind::Timer => ActivePuzzleState::Timer(TimerPuzzleState {
+                    started_at_tick: self.tick,
+                    target_start: pick_timer_target_start(station.id, id),
+                }),
+                PuzzleKind::Wires => ActivePuzzleState::Wires(create_wires_state(station.id, id)),
+            },
+        });
+    }
+
+    fn handle_puzzle_tap(&mut self, id: Uuid) {
+        let Some(station_index) = self.active_station_for_player(id) else {
+            return;
+        };
+
+        let (station_id, solved) = {
+            let Some(station) = self.puzzle_stations.get_mut(station_index) else {
+                return;
+            };
+
+            let solved = match station.occupant.as_mut() {
+                Some(PuzzleOccupant {
+                    player_id,
+                    state: ActivePuzzleState::Timer(timer),
+                }) if *player_id == id => {
+                    angle_in_arc(current_timer_angle(self.tick, timer), timer.target_start, TIMER_TARGET_SIZE)
+                }
+                _ => return,
+            };
+
+            (station.id, solved)
+        };
+
+        if solved {
+            self.complete_puzzle(id, station_id);
+            return;
+        }
+
+        // Reset the timer timing window on a miss so the player must wait for a new pass.
+        if let Some(station) = self.puzzle_stations.get_mut(station_index) {
+            if let Some(PuzzleOccupant {
+                state: ActivePuzzleState::Timer(timer),
+                ..
+            }) = station.occupant.as_mut()
+            {
+                timer.started_at_tick = self.tick;
+            }
+        }
+    }
+
+    fn handle_puzzle_connect(&mut self, id: Uuid, from_index: usize, to_index: usize) {
+        let Some(station_index) = self.active_station_for_player(id) else {
+            return;
+        };
+
+        let (station_id, solved) = {
+            let Some(station) = self.puzzle_stations.get_mut(station_index) else {
+                return;
+            };
+
+            let solved = match station.occupant.as_mut() {
+                Some(PuzzleOccupant {
+                    player_id,
+                    state: ActivePuzzleState::Wires(wires),
+                }) if *player_id == id => {
+                    if from_index >= wires.left_colors.len()
+                        || to_index >= wires.right_colors.len()
+                        || wires.connected_pairs.iter().any(|pair| {
+                            pair.from_index == from_index || pair.to_index == to_index
+                        })
+                        || wires.left_colors[from_index] != wires.right_colors[to_index]
+                    {
+                        return;
+                    }
+
+                    wires.connected_pairs.push(WireConnection {
+                        from_index,
+                        to_index,
+                    });
+                    wires.connected_pairs.len() == wires.left_colors.len()
+                }
+                _ => return,
+            };
+
+            (station.id, solved)
+        };
+
+        if solved {
+            self.complete_puzzle(id, station_id);
+        }
+    }
+
+    fn sync_puzzle_sessions(&mut self) {
+        // Release every active puzzle whenever the round is not in live free-move play.
+        if !matches!(self.phase, GamePhase::Playing) {
+            for station in &mut self.puzzle_stations {
+                station.occupant = None;
+            }
+            return;
+        }
+
+        let mut players_to_release = Vec::new();
+        for station in &self.puzzle_stations {
+            let Some(occupant) = station.occupant.as_ref() else {
+                continue;
+            };
+
+            let Some(player) = self.players.get(&occupant.player_id) else {
+                players_to_release.push(occupant.player_id);
+                continue;
+            };
+
+            // Keep sessions active only while the authoritative player remains eligible and nearby.
+            if !can_work_puzzles(player)
+                || distance_sq(player.x, player.z, station.x, station.z) > PUZZLE_RANGE * PUZZLE_RANGE
+            {
+                players_to_release.push(occupant.player_id);
+            }
+        }
+
+        for player_id in players_to_release {
+            self.release_puzzle_for_player(player_id);
+        }
+    }
+
+    fn active_station_for_player(&self, player_id: Uuid) -> Option<usize> {
+        self.puzzle_stations.iter().position(|station| {
+            station
+                .occupant
+                .as_ref()
+                .map(|occupant| occupant.player_id == player_id)
+                .unwrap_or(false)
+        })
+    }
+
+    fn release_puzzle_for_player(&mut self, player_id: Uuid) {
+        if let Some(station_index) = self.active_station_for_player(player_id) {
+            self.puzzle_stations[station_index].occupant = None;
+        }
+    }
+
+    fn complete_puzzle(&mut self, player_id: Uuid, station_id: Uuid) {
+        if let Some(player) = self.players.get_mut(&player_id) {
+            // Track task completion per station so each crew member must clear all ten stations once.
+            player.completed_puzzle_station_ids.insert(station_id);
+        }
+
+        self.release_puzzle_for_player(player_id);
+        self.check_win_condition();
+    }
+
     /// Syncs world state to all clients.
     pub fn sync(&mut self) {
         let payload = ServerResponse::WorldSnapshot {
@@ -535,6 +810,8 @@ impl World {
                 // Send player progress so pre-match UI can show waiting status.
                 joined_players: self.players.len(),
                 expected_players: MIN_PLAYERS,
+                map_half_extent: self.map_half_extent,
+                lobby_countdown_ends_at: self.lobby_countdown_ends_at_tick.map(|tick| tick * 1000 / self.tick_rate as u64),
                 players: self
                     .players
                     .values()
@@ -546,7 +823,11 @@ impl World {
                         x: player.x,
                         z: player.z,
                         state: player.state,
+                        // Send cooldown in rendered server-time units so the client can gate kills accurately.
+                        kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000 / self.tick_rate as u64,
                         last_processed_seq: player.last_seq,
+                        completed_puzzle_count: player.completed_puzzle_station_ids.len(),
+                        total_puzzle_count: TOTAL_PUZZLES_PER_PLAYER,
                     })
                     .collect::<Vec<_>>(),
                 dead_bodies: self
@@ -558,6 +839,40 @@ impl World {
                         x: body.x,
                         z: body.z,
                         reported: body.reported,
+                    })
+                    .collect::<Vec<_>>(),
+                puzzle_stations: self
+                    .puzzle_stations
+                    .iter()
+                    .map(|station| PuzzleStationSnapshot {
+                        id: station.id,
+                        kind: station.kind,
+                        x: station.x,
+                        z: station.z,
+                        occupied_by: station.occupant.as_ref().map(|occupant| occupant.player_id),
+                        completed_by: self
+                            .join_order
+                            .iter()
+                            .filter(|player_id| {
+                                self.players
+                                    .get(player_id)
+                                    .map(|player| player.completed_puzzle_station_ids.contains(&station.id))
+                                    .unwrap_or(false)
+                            })
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        projection: station.occupant.as_ref().map(|occupant| match &occupant.state {
+                            ActivePuzzleState::Timer(timer) => PuzzleProjectionState::Timer {
+                                dial_angle: current_timer_angle(self.tick, timer),
+                                target_start: timer.target_start,
+                                target_size: TIMER_TARGET_SIZE,
+                            },
+                            ActivePuzzleState::Wires(wires) => PuzzleProjectionState::Wires {
+                                left_colors: wires.left_colors.to_vec(),
+                                right_colors: wires.right_colors.to_vec(),
+                                connected_pairs: wires.connected_pairs.clone(),
+                            },
+                        }),
                     })
                     .collect::<Vec<_>>(),
                 active_sabotages: self.active_sabotages.clone(),
@@ -587,16 +902,43 @@ impl World {
     }
 
     fn try_start_match(&mut self) {
-        if !matches!(self.phase, GamePhase::Lobby) || self.round_locked || self.players.len() < MIN_PLAYERS {
+        // Only lobby snapshots with enough players can own an active start countdown.
+        if !matches!(self.phase, GamePhase::Lobby) || self.round_locked {
+            self.lobby_countdown_ends_at_tick = None;
             return;
         }
 
+        if self.players.len() < MIN_PLAYERS {
+            self.lobby_countdown_ends_at_tick = None;
+            return;
+        }
+
+        if self.lobby_countdown_ends_at_tick.is_none() {
+            self.lobby_countdown_ends_at_tick = Some(
+                self.tick + (self.tick_rate as u64 * LOBBY_COUNTDOWN_SECONDS),
+            );
+        }
+
+        if self.tick < self.lobby_countdown_ends_at_tick.expect("countdown just initialized") {
+            return;
+        }
+
+        self.lobby_countdown_ends_at_tick = None;
         self.phase = GamePhase::Playing;
         self.dead_bodies.clear();
         self.active_sabotages.clear();
         self.meeting = None;
         self.ejection = None;
         self.win = None;
+        for station in &mut self.puzzle_stations {
+            station.occupant = None;
+        }
+
+        info!(
+            tick = self.tick,
+            player_count = self.players.len(),
+            "SERVER STATE TRANSITION: game started (Lobby -> Playing)"
+        );
 
         // Keep the first slice deterministic: use join order for role assignment.
         let role_ids = self.join_order.clone();
@@ -615,7 +957,15 @@ impl World {
                 player.kill_cooldown_ends_at_tick = 0;
                 player.move_x = 0.0;
                 player.move_z = 0.0;
+                player.completed_puzzle_station_ids.clear();
             }
+
+            info!(
+                tick = self.tick,
+                player_id = %player_id,
+                role = ?role,
+                "SERVER STATE: player assigned role"
+            );
 
             let _ = self.event_tx.send(ServerEvent::Direct {
                 to: player_id,
@@ -680,6 +1030,14 @@ impl World {
             ejected_player_id,
         });
 
+        info!(
+            tick = self.tick,
+            phase = ?self.phase,
+            ejected_player_id = ?ejected_player_id,
+            was_imposter = ?was_imposter,
+            "SERVER STATE TRANSITION: meeting resolved (Meeting -> Ejection)"
+        );
+
         let _ = self
             .event_tx
             .send(ServerEvent::Broadcast(ServerResponse::EjectionResult {
@@ -737,6 +1095,12 @@ impl World {
         self.check_win_condition();
 
         self.phase = GamePhase::Playing;
+
+        info!(
+            tick = self.tick,
+            phase = ?self.phase,
+            "SERVER STATE TRANSITION: ejection ended (Ejection -> Playing)"
+        );
     }
 
     fn expire_sabotages(&mut self) {
@@ -756,6 +1120,18 @@ impl World {
             return;
         }
 
+        let total_task_players = self
+            .players
+            .values()
+            .filter(|player| is_task_role(player.role))
+            .count();
+        let all_tasks_complete = total_task_players > 0
+            && self
+                .players
+                .values()
+                .filter(|player| is_task_role(player.role))
+                .all(|player| player.completed_puzzle_station_ids.len() >= TOTAL_PUZZLES_PER_PLAYER);
+
         let alive_imposters = self
             .players
             .values()
@@ -771,7 +1147,12 @@ impl World {
             })
             .count();
 
-        let win = if alive_imposters == 0 {
+        let win = if all_tasks_complete {
+            Some(WinMessage {
+                winner: Faction::Crew,
+                reason: "all_tasks_complete".to_string(),
+            })
+        } else if alive_imposters == 0 {
             Some(WinMessage {
                 winner: Faction::Crew,
                 reason: "all_imposters_ejected".to_string(),
@@ -789,6 +1170,14 @@ impl World {
             self.meeting = None;
             self.ejection = None;
             self.win = Some(win_message.clone());
+
+            info!(
+                tick = self.tick,
+                winner = ?win_message.winner,
+                reason = %win_message.reason,
+                "SERVER STATE TRANSITION: game ended (win condition met)"
+            );
+
             let _ = self
                 .event_tx
                 .send(ServerEvent::Broadcast(ServerResponse::Win {
@@ -803,11 +1192,21 @@ impl World {
     fn reset_to_lobby(&mut self) {
         // Clear the completed round so the next match can start from a clean lobby.
         self.phase = GamePhase::Lobby;
+        self.lobby_countdown_ends_at_tick = None;
         self.meeting = None;
         self.ejection = None;
         self.win = None;
         self.dead_bodies.clear();
         self.active_sabotages.clear();
+        for station in &mut self.puzzle_stations {
+            station.occupant = None;
+        }
+
+        info!(
+            tick = self.tick,
+            player_count = self.players.len(),
+            "SERVER STATE TRANSITION: reset to lobby"
+        );
 
         // Restore every connected player to a fresh lobby state.
         for (index, player_id) in self.join_order.iter().copied().enumerate() {
@@ -821,6 +1220,7 @@ impl World {
                 player.role = PlayerRole::Crewmate;
                 player.state = PlayerState::Alive;
                 player.kill_cooldown_ends_at_tick = 0;
+                player.completed_puzzle_station_ids.clear();
             }
         }
     }
@@ -833,9 +1233,140 @@ impl World {
     }
 }
 
+fn can_work_puzzles(player: &Player) -> bool {
+    is_task_role(player.role) && matches!(player.state, PlayerState::Alive | PlayerState::Ghost)
+}
+
+fn is_task_role(role: PlayerRole) -> bool {
+    matches!(role, PlayerRole::Crewmate | PlayerRole::Sheriff)
+}
+
+fn current_timer_angle(tick: u64, timer: &TimerPuzzleState) -> f32 {
+    ((tick.saturating_sub(timer.started_at_tick) as f32) * TIMER_ROTATION_PER_TICK).rem_euclid(TAU)
+}
+
+fn angle_in_arc(angle: f32, arc_start: f32, arc_size: f32) -> bool {
+    let normalized_angle = angle.rem_euclid(TAU);
+    let normalized_start = arc_start.rem_euclid(TAU);
+    let delta = (normalized_angle - normalized_start).rem_euclid(TAU);
+    delta <= arc_size
+}
+
+fn pick_timer_target_start(station_id: Uuid, player_id: Uuid) -> f32 {
+    // Derive a deterministic target arc from station and player ids so every session is authoritative.
+    let seed = station_id.as_u128() ^ player_id.as_u128();
+    ((seed % 360) as f32).to_radians()
+}
+
+fn create_wires_state(station_id: Uuid, player_id: Uuid) -> WiresPuzzleState {
+    let right_colors = [WireColor::Red, WireColor::Blue, WireColor::Yellow, WireColor::Green];
+    let mut left_colors = right_colors;
+    let seed = (station_id.as_u128() ^ player_id.as_u128()) as usize;
+    let len = left_colors.len();
+
+    // Rotate and swap deterministically so each player gets a stable but shuffled wire layout.
+    left_colors.rotate_left(seed % len);
+    left_colors.swap(seed % len, (seed / len.max(1)) % len);
+
+    WiresPuzzleState {
+        left_colors,
+        right_colors,
+        connected_pairs: Vec::new(),
+    }
+}
+
+fn create_puzzle_stations() -> Vec<PuzzleStation> {
+    const LAYOUT: [(PuzzleKind, f32, f32); TOTAL_PUZZLES_PER_PLAYER] = [
+        (PuzzleKind::Timer, -20.0, -18.0),
+        (PuzzleKind::Wires, -8.0, -18.0),
+        (PuzzleKind::Timer, 4.0, -18.0),
+        (PuzzleKind::Wires, 16.0, -18.0),
+        (PuzzleKind::Timer, -20.0, -4.0),
+        (PuzzleKind::Wires, 16.0, -4.0),
+        (PuzzleKind::Timer, -20.0, 10.0),
+        (PuzzleKind::Wires, -8.0, 10.0),
+        (PuzzleKind::Timer, 4.0, 10.0),
+        (PuzzleKind::Wires, 16.0, 10.0),
+    ];
+
+    LAYOUT
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, x, z))| PuzzleStation {
+            id: Uuid::from_u128((index + 1) as u128),
+            kind,
+            x,
+            z,
+            occupant: None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiple_players_move_and_sync_in_same_tick() {
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        world.phase = GamePhase::Playing;
+
+        let player_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for (index, player_id) in player_ids.iter().copied().enumerate() {
+            world.join_order.push(player_id);
+            world.players.insert(
+                player_id,
+                Player {
+                    id: player_id,
+                    name: format!("Player-{index}"),
+                    color: "#fff".to_string(),
+                    x: 0.0,
+                    z: 0.0,
+                    move_x: 0.0,
+                    move_z: 0.0,
+                    last_seq: 0,
+                    role: PlayerRole::Crewmate,
+                    state: PlayerState::Alive,
+                    kill_cooldown_ends_at_tick: 0,
+                    completed_puzzle_station_ids: HashSet::new(),
+                },
+            );
+        }
+
+        world.handle_input(player_ids[0], 1, 1.0, 0.0);
+        world.handle_input(player_ids[1], 1, 0.0, 1.0);
+        world.handle_input(player_ids[2], 1, -1.0, 0.0);
+        world.tick();
+        world.sync();
+
+        let event = event_rx.try_recv().expect("world snapshot broadcasted");
+        let ServerEvent::Broadcast(ServerResponse::WorldSnapshot { snapshot }) = event else {
+            panic!("expected world snapshot broadcast");
+        };
+
+        let players = snapshot
+            .players
+            .into_iter()
+            .map(|player| (player.id, player))
+            .collect::<HashMap<_, _>>();
+        let distance_per_tick = MOVE_SPEED / TICK_RATE as f32;
+
+        let east = players.get(&player_ids[0]).expect("east player present");
+        assert!((east.x - distance_per_tick).abs() < f32::EPSILON);
+        assert!(east.z.abs() < f32::EPSILON);
+        assert_eq!(east.last_processed_seq, 1);
+
+        let north = players.get(&player_ids[1]).expect("north player present");
+        assert!(north.x.abs() < f32::EPSILON);
+        assert!((north.z - distance_per_tick).abs() < f32::EPSILON);
+        assert_eq!(north.last_processed_seq, 1);
+
+        let west = players.get(&player_ids[2]).expect("west player present");
+        assert!((west.x + distance_per_tick).abs() < f32::EPSILON);
+        assert!(west.z.abs() < f32::EPSILON);
+        assert_eq!(west.last_processed_seq, 1);
+    }
 
     #[test]
     fn win_state_returns_to_lobby_without_restarting() {
@@ -858,12 +1389,10 @@ mod tests {
                 role: PlayerRole::Imposter,
                 state: PlayerState::Ghost,
                 kill_cooldown_ends_at_tick: 99,
+                completed_puzzle_station_ids: HashSet::new(),
             },
         );
-        world.win = Some(WinMessage {
-            winner: Faction::Crew,
-            reason: "all_imposters_ejected".to_string(),
-        });
+        world.phase = GamePhase::Playing;
         world.dead_bodies.insert(
             Uuid::new_v4(),
             DeadBody {
@@ -880,7 +1409,7 @@ mod tests {
             ends_at_tick: 10,
         });
 
-        world.tick();
+        world.check_win_condition();
 
         assert_eq!(world.phase, GamePhase::Lobby);
         assert!(world.win.is_none());
@@ -898,12 +1427,374 @@ mod tests {
         assert_eq!(player.last_seq, 0);
         assert_eq!((player.x, player.z), pick_spawn_position(0));
     }
+
+    #[test]
+    fn lobby_countdown_waits_thirty_seconds_before_starting() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+
+        for index in 0..MIN_PLAYERS {
+            let player_id = Uuid::new_v4();
+            world.join_order.push(player_id);
+            world.players.insert(
+                player_id,
+                Player {
+                    id: player_id,
+                    name: format!("Player-{index}"),
+                    color: "#fff".to_string(),
+                    x: 0.0,
+                    z: 0.0,
+                    move_x: 0.0,
+                    move_z: 0.0,
+                    last_seq: 0,
+                    role: PlayerRole::Crewmate,
+                    state: PlayerState::Alive,
+                    kill_cooldown_ends_at_tick: 0,
+                    completed_puzzle_station_ids: HashSet::new(),
+                },
+            );
+        }
+
+        world.try_start_match();
+        assert_eq!(world.phase, GamePhase::Lobby);
+        assert_eq!(
+            world.lobby_countdown_ends_at_tick,
+            Some(world.tick + (world.tick_rate as u64 * LOBBY_COUNTDOWN_SECONDS))
+        );
+
+        world.tick = world.lobby_countdown_ends_at_tick.expect("countdown present") - 1;
+        world.try_start_match();
+        assert_eq!(world.phase, GamePhase::Lobby);
+
+        world.tick += 1;
+        world.try_start_match();
+        assert_eq!(world.phase, GamePhase::Playing);
+        assert!(world.lobby_countdown_ends_at_tick.is_none());
+    }
+
+    #[test]
+    fn lobby_countdown_clears_when_lobby_drops_below_minimum() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+
+        world.lobby_countdown_ends_at_tick = Some(42);
+        world.players.insert(
+            Uuid::new_v4(),
+            Player {
+                id: Uuid::new_v4(),
+                name: "Player-0".to_string(),
+                color: "#fff".to_string(),
+                x: 0.0,
+                z: 0.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+
+        world.try_start_match();
+        assert_eq!(world.phase, GamePhase::Lobby);
+        assert!(world.lobby_countdown_ends_at_tick.is_none());
+    }
+
+    #[test]
+    fn kill_turns_victim_into_ghost_and_sets_snapshot_cooldown() {
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+
+        let killer_id = Uuid::new_v4();
+        let victim_id = Uuid::new_v4();
+        let witness_id = Uuid::new_v4();
+        let witness_two_id = Uuid::new_v4();
+        world.phase = GamePhase::Playing;
+        world.join_order.push(killer_id);
+        world.join_order.push(victim_id);
+        world.join_order.push(witness_id);
+        world.join_order.push(witness_two_id);
+        world.players.insert(
+            killer_id,
+            Player {
+                id: killer_id,
+                name: "RED".to_string(),
+                color: "#ef4444".to_string(),
+                x: 0.0,
+                z: 0.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Imposter,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.players.insert(
+            victim_id,
+            Player {
+                id: victim_id,
+                name: "BLUE".to_string(),
+                color: "#3b82f6".to_string(),
+                x: 1.0,
+                z: 1.0,
+                move_x: 0.5,
+                move_z: 0.5,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.players.insert(
+            witness_id,
+            Player {
+                id: witness_id,
+                name: "GREEN".to_string(),
+                color: "#22c55e".to_string(),
+                x: 8.0,
+                z: 8.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.players.insert(
+            witness_two_id,
+            Player {
+                id: witness_two_id,
+                name: "YELLOW".to_string(),
+                color: "#eab308".to_string(),
+                x: -8.0,
+                z: 8.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+
+        world.handle_kill(killer_id, victim_id);
+
+        let victim = world.players.get(&victim_id).expect("victim present");
+        assert_eq!(victim.state, PlayerState::Ghost);
+        assert_eq!(victim.move_x, 0.0);
+        assert_eq!(victim.move_z, 0.0);
+        assert_eq!(world.dead_bodies.len(), 1);
+
+        let killer = world.players.get(&killer_id).expect("killer present");
+        assert_eq!(killer.kill_cooldown_ends_at_tick, world.tick + (world.tick_rate as u64 * 30));
+
+        world.sync();
+
+        let ServerEvent::Broadcast(ServerResponse::WorldSnapshot { snapshot }) = event_rx
+            .try_recv()
+            .expect("world snapshot broadcasted")
+        else {
+            panic!("expected world snapshot event");
+        };
+
+        let snapshot_killer = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == killer_id)
+            .expect("killer in snapshot");
+        let snapshot_victim = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == victim_id)
+            .expect("victim in snapshot");
+
+        assert_eq!(snapshot_victim.state, PlayerState::Ghost);
+        assert_eq!(snapshot.dead_bodies.len(), 1);
+        assert_eq!(snapshot_killer.kill_cooldown_ends_at, 30_000);
+    }
+
+    #[test]
+    fn timer_puzzle_tap_completes_station_for_player() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        let player_id = Uuid::new_v4();
+        let station_id = world.puzzle_stations[0].id;
+
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Crewmate".to_string(),
+                color: "#fff".to_string(),
+                x: world.puzzle_stations[0].x,
+                z: world.puzzle_stations[0].z,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.phase = GamePhase::Playing;
+        world.puzzle_stations[0].occupant = Some(PuzzleOccupant {
+            player_id,
+            state: ActivePuzzleState::Timer(TimerPuzzleState {
+                started_at_tick: 0,
+                target_start: 0.0,
+            }),
+        });
+
+        world.handle_puzzle_tap(player_id);
+
+        assert!(world
+            .players
+            .get(&player_id)
+            .expect("player present")
+            .completed_puzzle_station_ids
+            .contains(&station_id));
+        assert!(world.puzzle_stations[0].occupant.is_none());
+    }
+
+    #[test]
+    fn all_completed_tasks_emit_crew_win() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut event_rx = event_tx.subscribe();
+        let mut world = World::new(event_tx);
+        let completed_ids = world
+            .puzzle_stations
+            .iter()
+            .map(|station| station.id)
+            .collect::<HashSet<_>>();
+
+        let crew_id = Uuid::new_v4();
+        let imposter_id = Uuid::new_v4();
+        world.join_order.push(crew_id);
+        world.join_order.push(imposter_id);
+        world.players.insert(
+            crew_id,
+            Player {
+                id: crew_id,
+                name: "Crewmate".to_string(),
+                color: "#fff".to_string(),
+                x: 0.0,
+                z: 0.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: completed_ids,
+            },
+        );
+        world.players.insert(
+            imposter_id,
+            Player {
+                id: imposter_id,
+                name: "Imposter".to_string(),
+                color: "#f00".to_string(),
+                x: 4.0,
+                z: 0.0,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Imposter,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.phase = GamePhase::Playing;
+
+        world.check_win_condition();
+
+        let win_event = event_rx
+            .try_recv()
+            .expect("win event should be broadcast after all tasks complete");
+        match win_event {
+            ServerEvent::Broadcast(ServerResponse::Win { winner, reason }) => {
+                assert_eq!(winner, Faction::Crew);
+                assert_eq!(reason, "all_tasks_complete");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(world.phase, GamePhase::Lobby);
+        assert!(world.round_locked);
+    }
+
+    #[test]
+    fn lobby_movement_clamps_to_circle() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        let player_id = Uuid::new_v4();
+
+        world.join_order.push(player_id);
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Player-0".to_string(),
+                color: "#fff".to_string(),
+                x: 29.0,
+                z: 0.0,
+                move_x: 1.0,
+                move_z: 1.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.phase = GamePhase::Lobby;
+
+        world.tick();
+
+        let player = world.players.get(&player_id).expect("player present");
+        assert!(
+            (player.x * player.x) + (player.z * player.z)
+                <= (world.map_half_extent * world.map_half_extent) + 0.001
+        );
+    }
 }
 
 fn distance_sq(ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
     let dx = ax - bx;
     let dz = az - bz;
     (dx * dx) + (dz * dz)
+}
+
+fn clamp_position_to_phase_bounds(
+    x: f32,
+    z: f32,
+    map_half_extent: f32,
+    phase: GamePhase,
+) -> (f32, f32) {
+    if !matches!(phase, GamePhase::Lobby) {
+        return (
+            x.clamp(-map_half_extent, map_half_extent),
+            z.clamp(-map_half_extent, map_half_extent),
+        );
+    }
+
+    // Keep the pre-match lobby circular while the in-match arena stays square.
+    let distance_sq = (x * x) + (z * z);
+    let radius_sq = map_half_extent * map_half_extent;
+    if distance_sq <= radius_sq || distance_sq == 0.0 {
+        return (x, z);
+    }
+
+    let scale = map_half_extent / distance_sq.sqrt();
+    (x * scale, z * scale)
 }
 
 fn pick_player_color(index: usize) -> (&'static str, &'static str) {

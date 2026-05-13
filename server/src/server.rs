@@ -332,6 +332,57 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
+                    ClientRequest::StartPuzzle { station_id } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::StartPuzzle { id, station_id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE START");
+                            break;
+                        }
+                    }
+                    ClientRequest::CancelPuzzle => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::CancelPuzzle { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE CANCEL");
+                            break;
+                        }
+                    }
+                    ClientRequest::PuzzleTap => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::PuzzleTap { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE TAP");
+                            break;
+                        }
+                    }
+                    ClientRequest::PuzzleConnect {
+                        from_index,
+                        to_index,
+                    } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::PuzzleConnect {
+                                id,
+                                from_index,
+                                to_index,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE CONNECT");
+                            break;
+                        }
+                    }
                     ClientRequest::ClientLog {
                         scope,
                         event,
@@ -409,7 +460,11 @@ async fn read_join_message(
             | ClientRequest::ReportBody { .. }
             | ClientRequest::Vote { .. }
             | ClientRequest::MeetingChat { .. }
-            | ClientRequest::Sabotage { .. } => return Err(()),
+            | ClientRequest::Sabotage { .. }
+            | ClientRequest::StartPuzzle { .. }
+            | ClientRequest::CancelPuzzle
+            | ClientRequest::PuzzleTap
+            | ClientRequest::PuzzleConnect { .. } => return Err(()),
         }
     }
 }

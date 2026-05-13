@@ -42,10 +42,21 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
   title.style.fontWeight = "800";
 
   const status = document.createElement("div");
+  const notice = document.createElement("div");
   const roster = document.createElement("div");
   const chat = document.createElement("div");
   const input = document.createElement("textarea");
   const send = document.createElement("button");
+
+  const wireAction = (button: HTMLButtonElement, onActivate: () => void) => {
+    // Fire on pointer down so taps are not lost on mobile browsers.
+    button.style.touchAction = "manipulation";
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      if (button.disabled) return;
+      onActivate();
+    });
+  };
 
   // Keep chat visible on both variants, but only players can submit new messages.
   input.placeholder = options.readOnly ? "Read-only server view" : "Send a chat message";
@@ -53,15 +64,18 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
   input.disabled = options.readOnly;
   send.textContent = options.readOnly ? "Read-only" : "Send";
   send.disabled = options.readOnly;
-  send.onclick = () => {
+  wireAction(send, () => {
     if (options.readOnly || !options.network) return;
     const message = input.value.trim();
     if (!message) return;
-    options.network.sendMessage({ type: "meeting_chat", message });
+    if (!options.network.sendMessage({ type: "meeting_chat", message })) return;
     input.value = "";
-  };
+  });
 
-  left.append(title, status, roster);
+  notice.style.minHeight = "1.25rem";
+  notice.style.opacity = "0.85";
+
+  left.append(title, status, notice, roster);
   right.append(chat, input, send);
   root.append(left, right);
   document.body.appendChild(root);
@@ -76,6 +90,7 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
       }
 
       root.style.display = "grid";
+      notice.textContent = state.notice;
       const ticksLeft = Math.max(0, snapshot.meeting.endsAtTick - snapshot.tick);
       status.innerHTML = `<strong>Votes</strong> ${snapshot.meeting.votesCast}/${snapshot.meeting.totalVoters}<br /><strong>Time left</strong> ${formatMeetingTimeLeft(ticksLeft)}<br />${state.notice}`;
 
@@ -99,7 +114,7 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
         if (!options.readOnly && options.network) {
           const button = document.createElement("button");
           button.textContent = "Vote";
-          button.onclick = () => options.network?.sendMessage({ type: "vote", target: player.id });
+          wireAction(button, () => options.network?.sendMessage({ type: "vote", target: player.id }));
           row.appendChild(button);
         }
 
@@ -113,7 +128,7 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
       if (!options.readOnly && options.network) {
         const skipButton = document.createElement("button");
         skipButton.textContent = "Skip Vote";
-        skipButton.onclick = () => options.network?.sendMessage({ type: "vote", target: "skip" });
+        wireAction(skipButton, () => options.network?.sendMessage({ type: "vote", target: "skip" }));
         skipRow.appendChild(skipButton);
       }
 

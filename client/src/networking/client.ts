@@ -1,8 +1,11 @@
 import type { ClientMessage, ServerMessage, WelcomeMessage } from "./message";
+import { Logger, LOG_SCOPES } from "../logger";
 
 type MessageHandler = (msg: ServerMessage) => void;
 
 type DisconnectHandler = () => void;
+
+const DEFAULT_MOVE_SPEED = 10.0;
 
 export class NetworkClient {
   private connection: WebSocket | null = null;
@@ -13,6 +16,8 @@ export class NetworkClient {
   private maxReconnectAttempts = 5;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isDisconnecting = false;
+  private nextInputSeqValue = 0;
+  private moveSpeed = DEFAULT_MOVE_SPEED;
 
   private getUrl(): string {
     // Read HTTP server base URI from env and default locally if missing.
@@ -48,27 +53,40 @@ async connect(): Promise<void> {
       this.connection.onopen = () => {
         this.connectPromise = null;
         this.reconnectAttempts = 0;
+        Logger.info(LOG_SCOPES.NETWORK, "CLIENT: connected to server");
         res();
       };
 
       this.connection.onerror = () => {
         this.connectPromise = null;
         this.handleDisconnect(false);
+        Logger.error(LOG_SCOPES.NETWORK, "CLIENT: websocket error");
         rej(new Error("Failed to connect socket"));
       };
 
-      this.connection.onmessage = (event) => {
+this.connection.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data as string) as ServerMessage;
+          if (msg.type === "welcome") {
+            // Keep session movement settings aligned with the authoritative server welcome.
+            this.nextInputSeqValue = 0;
+            this.moveSpeed = msg.moveSpeed;
+            Logger.info(LOG_SCOPES.NETWORK, "CLIENT: received welcome", {
+              playerId: msg.playerId,
+              name: msg.name,
+              role: msg.observer ? "observer" : "player",
+            });
+          }
           this.messageHandlers.forEach((handler) => handler(msg));
         } catch {
-          console.error("Failed to parse websocket message", event.data);
+          Logger.error(LOG_SCOPES.NETWORK, "CLIENT: failed to parse message", { raw: event.data });
         }
       };
 
       this.connection.onclose = () => {
         this.connection = null;
         this.connectPromise = null;
+        Logger.info(LOG_SCOPES.NETWORK, "CLIENT: disconnected");
         this.handleDisconnect(this.isDisconnecting);
       };
     });
@@ -125,6 +143,16 @@ async connect(): Promise<void> {
     return !!this.connection && this.connection.readyState === WebSocket.OPEN;
   }
 
+  nextInputSeq(): number {
+    // Use one monotonic input stream for the whole websocket session across scene changes.
+    this.nextInputSeqValue += 1;
+    return this.nextInputSeqValue;
+  }
+
+  getMoveSpeed(): number {
+    return this.moveSpeed;
+  }
+
   onMessage(handler: MessageHandler) {
     // Register callback and return an unsubscribe helper.
     this.messageHandlers.add(handler);
@@ -149,6 +177,8 @@ async connect(): Promise<void> {
     this.connection = null;
     this.connectPromise = null;
     this.reconnectAttempts = 0;
+    this.nextInputSeqValue = 0;
+    this.moveSpeed = DEFAULT_MOVE_SPEED;
   }
 
   onDisconnect(handler: DisconnectHandler) {

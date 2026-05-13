@@ -1,30 +1,48 @@
 import nipplejs from "nipplejs";
 import {
+  AbstractMesh,
   ArcRotateCamera,
-  Camera,
-  Color3,
   Color4,
   Engine,
-  HemisphericLight,
   Mesh,
-  MeshBuilder,
+  PointerEventTypes,
   Scene,
   StandardMaterial,
-  Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { NetworkClient } from "../../networking/client";
+import { Logger, LOG_SCOPES } from "../../logger";
 import type {
   GamePhase,
   PlayerRole,
   PlayerState,
+  PuzzleProjectionState,
+  PuzzleStationSnapshot,
   ServerMessage,
   SnapshotDeadBody,
   SnapshotPlayer,
   WorldSnapshot,
 } from "../../networking/message";
+import { createPuzzleModal } from "../puzzles/puzzleModal";
+import { drawTimerPuzzleScene } from "../puzzles/timerPuzzleScene";
+import { drawWiresPuzzleScene } from "../puzzles/wiresPuzzleScene";
 import { cameraRelativeMovement } from "../cameraMovement";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
+import {
+  applyGrayPlayerTint,
+  applyWorldTheme,
+  clampPositionToPhaseBounds,
+  createSharedWorldArena,
+  createSharedWorldCamera,
+  createWorldBodyMesh,
+  createWorldLight,
+  createWorldPuzzleStationMesh,
+  createWorldPlayerMesh,
+  DEFAULT_MAP_HALF_EXTENT,
+  getSnapshotMapHalfExtent,
+  setMeshHeight,
+  type WorldPuzzleStationMesh,
+} from "../world";
 
 export type WinSceneData = {
   snapshot: WorldSnapshot;
@@ -32,9 +50,9 @@ export type WinSceneData = {
   reason: string;
 };
 
-const MOVE_SPEED = 6.0;
 const BODY_INTERACTION_RANGE_SQ = 16;
 const KILL_INTERACTION_RANGE_SQ = 36;
+const PUZZLE_INTERACTION_RANGE_SQ = 20.25;
 const CAMERA_ORTHO_HALF_HEIGHT = 28;
 
 type RemoteSnapshot = { time: number; x: number; z: number };
@@ -50,12 +68,15 @@ type BodyMeshState = {
   mesh: Mesh;
 };
 
+type PuzzleStationMeshState = WorldPuzzleStationMesh;
+
 type PendingInput = { seq: number; moveX: number; moveZ: number; dt: number };
 
 type SessionState = {
   latestServerTime: number;
   clientRenderTime: number;
   pendingInputs: PendingInput[];
+  moveSpeed: number;
   localRole: PlayerRole | null;
   phase: GamePhase;
   latestSnapshot: WorldSnapshot | null;
@@ -67,6 +88,18 @@ type HudState = {
   status: HTMLDivElement;
   actions: HTMLDivElement;
   meeting: HTMLDivElement;
+  reportButton: HudButtonState;
+  killButton: HudButtonState;
+  lightsButton: HudButtonState;
+  grayButton: HudButtonState;
+  puzzleButton: HudButtonState;
+};
+
+type HudButtonState = {
+  button: HTMLButtonElement;
+  setEnabled: (enabled: boolean) => void;
+  setLabel: (label: string) => void;
+  setAction: (action: (() => void) | null) => void;
 };
 
 export async function createGameScene(
@@ -83,25 +116,31 @@ export async function createGameScene(
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.81, 0.89, 0.99, 1);
 
-  const camera = createCamera(scene, canvas);
-  createEnvironment(scene);
+  const { camera } = createSharedWorldCamera(scene, { name: "camera", canvas, halfHeight: CAMERA_ORTHO_HALF_HEIGHT });
+  const arena = createEnvironment(scene);
+  applyWorldTheme(scene, arena, "playing", []);
 
   const players = new Map<string, PlayerMeshState>();
   const bodies = new Map<string, BodyMeshState>();
+  const puzzleStations = new Map<string, PuzzleStationMeshState>();
   const controller = setupPlayerController();
   const hud = createHud();
+  const puzzleModal = createPuzzleModal(network);
   const session: SessionState = {
     latestServerTime: 0,
     clientRenderTime: 0,
     pendingInputs: [],
+    moveSpeed: network.getMoveSpeed(),
     localRole: initialRole,
     phase: "lobby",
     latestSnapshot: null,
     notice: initialRole ? `Role: ${initialRole}` : "Waiting for match start...",
   };
 
+  const offPuzzlePointer = setupPuzzlePointerInteraction(scene, canvas, network, localPlayerId, session, puzzleStations);
+
   const offMessage = network.onMessage((message) => {
-    handleServerMessage(scene, players, bodies, message, localPlayerId, session, callbacks);
+    handleServerMessage(scene, arena, players, bodies, puzzleStations, message, localPlayerId, session, callbacks);
     updateHud(hud, session, localPlayerId, network);
   });
 
@@ -119,15 +158,18 @@ export async function createGameScene(
 
     updateRenderTime(session, dt);
     interpolateRemotePlayers(players, localPlayerId, session.clientRenderTime);
-    applySabotageVisuals(scene, players, session.latestSnapshot);
+    applySabotageVisuals(scene, arena, players, session.latestSnapshot);
     updateHud(hud, session, localPlayerId, network);
+    updatePuzzleModal(puzzleModal, session.latestSnapshot, localPlayerId);
   });
 
   scene.onDisposeObservable.add(() => {
     controller.dispose();
     offMessage();
+    offPuzzlePointer();
     scene.onBeforeRenderObservable.remove(renderLoop);
     hud.root.remove();
+    puzzleModal.dispose();
     for (const player of players.values()) {
       player.mesh.dispose();
       player.material.dispose();
@@ -135,58 +177,37 @@ export async function createGameScene(
     for (const body of bodies.values()) {
       body.mesh.dispose();
     }
+    for (const station of puzzleStations.values()) {
+      station.mesh.dispose();
+      station.material.dispose();
+      station.projectionMesh.dispose();
+      station.projectionMaterial.dispose();
+      station.projectionTexture.dispose();
+    }
     players.clear();
     bodies.clear();
+    puzzleStations.clear();
   });
 
   return scene;
 }
 
-function createCamera(scene: Scene, canvas: HTMLCanvasElement) {
-  // Lock the gameplay view into a fixed orthographic isometric angle.
-  const camera = new ArcRotateCamera(
-    "camera",
-    -Math.PI / 4,
-    0.95,
-    52,
-    Vector3.Zero(),
-    scene,
-  );
-  camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
-  camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
-  camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
-  scene.onBeforeRenderObservable.add(() => {
-    // Keep the world-space view size fixed so zoom does not change with screen size.
-    const engine = scene.getEngine();
-    const width = Math.max(1, engine.getRenderWidth());
-    const height = Math.max(1, engine.getRenderHeight());
-    const aspect = width / height;
-    const halfHeight = CAMERA_ORTHO_HALF_HEIGHT;
-    const halfWidth = halfHeight * aspect;
-    camera.orthoLeft = -halfWidth;
-    camera.orthoRight = halfWidth;
-    camera.orthoBottom = -halfHeight;
-    camera.orthoTop = halfHeight;
-  });
-  camera.attachControl(canvas, true);
-  camera.inputs.clear();
-  return camera;
-}
-
 function createEnvironment(scene: Scene) {
-  const light = new HemisphericLight("light", new Vector3(0, 1, 0.3), scene);
-  light.intensity = 1;
-
-  const ground = MeshBuilder.CreateGround("ground", { width: 140, height: 140 }, scene);
-  const material = new StandardMaterial("ground-material", scene);
-  material.diffuseColor = Color3.FromHexString("#243b55");
-  ground.material = material;
+  createWorldLight(scene);
+  return createSharedWorldArena(scene, {
+    prefix: "game",
+    groundColor: "#243b55",
+    wallColor: "#8bb4ff",
+    initialMapHalfExtent: DEFAULT_MAP_HALF_EXTENT,
+  });
 }
 
 function handleServerMessage(
   scene: Scene,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   bodies: Map<string, BodyMeshState>,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
   message: ServerMessage,
   localPlayerId: string | null,
   session: SessionState,
@@ -198,13 +219,22 @@ function handleServerMessage(
   switch (message.type) {
     case "welcome":
       session.notice = `Connected as ${message.name}`;
+      Logger.info(LOG_SCOPES.GAME, "CLIENT: connected to game server", {
+        name: message.name,
+      });
       break;
     case "game_started":
       session.localRole = message.role;
       session.notice = `Role: ${message.role}`;
+      Logger.info(LOG_SCOPES.STATE, "CLIENT: game started", {
+        role: message.role,
+      });
       break;
     case "meeting_started":
       session.notice = `Meeting started for body ${message.reportedBodyId.slice(0, 6)}`;
+      Logger.info(LOG_SCOPES.STATE, "CLIENT: meeting started", {
+        bodyId: message.reportedBodyId,
+      });
       callbacks?.onPhase("meeting");
       break;
     case "vote_update":
@@ -214,10 +244,18 @@ function handleServerMessage(
       session.notice = message.playerId
         ? `${message.playerId.slice(0, 6)} ejected${message.wasImposter ? " (imposter)" : ""}`
         : "No one was ejected";
+      Logger.info(LOG_SCOPES.STATE, "CLIENT: ejection result", {
+        ejectedId: message.playerId,
+        wasImposter: message.wasImposter,
+      });
       callbacks?.onPhase(message.playerId ? "ejected" : "noEjection");
       break;
     case "win":
       session.notice = `${message.winner} win: ${message.reason}`;
+      Logger.info(LOG_SCOPES.STATE, "CLIENT: game ended", {
+        winner: message.winner,
+        reason: message.reason,
+      });
       if (callbacks && session.latestSnapshot) {
         callbacks.onWin({
           snapshot: session.latestSnapshot,
@@ -235,15 +273,17 @@ function handleServerMessage(
           session.notice = `Role: ${localPlayer.role}`;
         }
       }
-      handleSnapshot(scene, players, bodies, message.snapshot, localPlayerId, session, callbacks);
+      handleSnapshot(scene, arena, players, bodies, puzzleStations, message.snapshot, localPlayerId, session, callbacks);
       break;
   }
 }
 
 function handleSnapshot(
   scene: Scene,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   bodies: Map<string, BodyMeshState>,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
   snapshot: WorldSnapshot,
   localPlayerId: string | null,
   session: SessionState,
@@ -253,8 +293,18 @@ function handleSnapshot(
   },
 ) {
   session.latestSnapshot = snapshot;
+  const prevPhase = session.phase;
   session.phase = snapshot.phase;
   session.latestServerTime = Math.max(session.latestServerTime, snapshot.serverTime);
+
+  if (prevPhase !== snapshot.phase) {
+    Logger.info(LOG_SCOPES.STATE, "CLIENT: phase change", {
+      from: prevPhase,
+      to: snapshot.phase,
+    });
+  }
+
+  arena.updateBounds(snapshot.mapHalfExtent, snapshot.phase);
 
   if (snapshot.phase === "win" && snapshot.win) {
     callbacks?.onWin({ snapshot, winner: snapshot.win.winner, reason: snapshot.win.reason });
@@ -265,9 +315,13 @@ function handleSnapshot(
     livePlayerIds.add(snapshotPlayer.id);
     const state = upsertPlayerMesh(scene, players, snapshotPlayer);
     updatePlayerTagColor(state.tag, snapshotPlayer.role, session.localRole);
+    // Ghosts still move, but they should not render in the normal player view.
+    const isGhost = snapshotPlayer.state === "ghost";
+    state.mesh.isVisible = !isGhost;
+    state.tag.mesh.isVisible = !isGhost;
 
     if (snapshotPlayer.id === localPlayerId) {
-      reconcileLocalPlayer(state, snapshotPlayer, session.pendingInputs);
+      reconcileLocalPlayer(state, snapshotPlayer, session.pendingInputs, session.moveSpeed, snapshot.mapHalfExtent, snapshot.phase);
     } else {
       state.snapshots.push({
         time: snapshot.serverTime,
@@ -280,7 +334,7 @@ function handleSnapshot(
       }
     }
 
-    state.mesh.position.y = snapshotPlayer.state === "ghost" ? 3 : 2;
+    setMeshHeight(state.mesh, snapshotPlayer.state);
   }
 
   cleanupDisconnectedPlayers(players, livePlayerIds);
@@ -296,6 +350,7 @@ function handleSnapshot(
   }
 
   cleanupDisconnectedBodies(bodies, liveBodyIds);
+  syncPuzzleStations(scene, puzzleStations, snapshot, localPlayerId);
 }
 
 function handleLocalPlayerMovement(
@@ -308,6 +363,7 @@ function handleLocalPlayerMovement(
   dt: number,
 ) {
   const input = controller.getInput();
+  const seq = network.nextInputSeq();
   const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
   const ix = movement.x;
   const iz = movement.z;
@@ -316,9 +372,16 @@ function handleLocalPlayerMovement(
   const localPlayer = localPlayerId ? session.latestSnapshot?.players.find((player) => player.id === localPlayerId) : undefined;
 
   if (localPlayerId && localState && localPlayer && canLocallyMove(session.phase, localPlayer.state)) {
-    localState.mesh.position.x += ix * MOVE_SPEED * dt;
-    localState.mesh.position.z += iz * MOVE_SPEED * dt;
-    session.pendingInputs.push({ seq: input.seq, moveX: ix, moveZ: iz, dt });
+    const mapHalfExtent = getSnapshotMapHalfExtent(session.latestSnapshot);
+    const clamped = clampPositionToPhaseBounds(
+      localState.mesh.position.x + ix * session.moveSpeed * dt,
+      localState.mesh.position.z + iz * session.moveSpeed * dt,
+      mapHalfExtent,
+      session.phase,
+    );
+    localState.mesh.position.x = clamped.x;
+    localState.mesh.position.z = clamped.z;
+    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt });
   }
 
   if (localState) {
@@ -328,7 +391,7 @@ function handleLocalPlayerMovement(
 
   network.sendMessage({
     type: "input",
-    seq: input.seq,
+    seq,
     moveX: ix,
     moveY: iz,
   });
@@ -342,6 +405,9 @@ function reconcileLocalPlayer(
   state: PlayerMeshState,
   snapshotPlayer: SnapshotPlayer,
   pendingInputs: PendingInput[],
+  moveSpeed: number,
+  mapHalfExtent: number,
+  phase: GamePhase,
 ) {
   let targetX = snapshotPlayer.x;
   let targetZ = snapshotPlayer.z;
@@ -351,9 +417,13 @@ function reconcileLocalPlayer(
   }
 
   for (const input of pendingInputs) {
-    targetX += input.moveX * MOVE_SPEED * input.dt;
-    targetZ += input.moveZ * MOVE_SPEED * input.dt;
+    targetX += input.moveX * moveSpeed * input.dt;
+    targetZ += input.moveZ * moveSpeed * input.dt;
   }
+
+  const clamped = clampPositionToPhaseBounds(targetX, targetZ, mapHalfExtent, phase);
+  targetX = clamped.x;
+  targetZ = clamped.z;
 
   const diffX = targetX - state.mesh.position.x;
   const diffZ = targetZ - state.mesh.position.z;
@@ -449,10 +519,7 @@ function upsertPlayerMesh(
     return existing;
   }
 
-  const mesh = MeshBuilder.CreateSphere(`player-${snapshotPlayer.id}`, { diameter: 2.6 }, scene);
-  const material = new StandardMaterial(`player-material-${snapshotPlayer.id}`, scene);
-  material.diffuseColor = Color3.FromHexString(snapshotPlayer.color);
-  mesh.material = material;
+  const { mesh, material } = createWorldPlayerMesh(scene, `player-${snapshotPlayer.id}`, snapshotPlayer.color);
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
 
   const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
@@ -479,12 +546,7 @@ function upsertBodyMesh(
   }
 
   // Represent dead bodies as short capsules lying on the ground.
-  const mesh = MeshBuilder.CreateCylinder(`body-${body.id}`, { height: 1.4, diameter: 1.2 }, scene);
-  const material = new StandardMaterial(`body-material-${body.id}`, scene);
-  material.diffuseColor = Color3.FromHexString("#ff5d73");
-  mesh.material = material;
-  mesh.rotation.z = Math.PI / 2;
-  mesh.position.y = 0.7;
+  const { mesh } = createWorldBodyMesh(scene, `body-${body.id}`);
 
   const bodyState = { mesh };
   bodies.set(body.id, bodyState);
@@ -511,29 +573,193 @@ function cleanupDisconnectedBodies(bodies: Map<string, BodyMeshState>, liveIds: 
   }
 }
 
+function syncPuzzleStations(
+  scene: Scene,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+  snapshot: WorldSnapshot,
+  localPlayerId: string | null,
+) {
+  // Keep one shared world station mesh per authoritative puzzle station.
+  const liveIds = new Set<string>();
+  for (const station of snapshot.puzzleStations) {
+    liveIds.add(station.id);
+    const meshState = upsertPuzzleStationMesh(scene, puzzleStations, station);
+    meshState.mesh.position.x = station.x;
+    meshState.mesh.position.z = station.z;
+    meshState.setStatus(Boolean(localPlayerId && station.completedBy.includes(localPlayerId)), station.occupiedBy !== null);
+    drawPuzzleProjection(meshState, station.projection);
+  }
+
+  for (const [id, state] of puzzleStations) {
+    if (liveIds.has(id)) continue;
+    state.mesh.dispose();
+    state.material.dispose();
+    state.projectionMaterial.dispose();
+    state.projectionTexture.dispose();
+    puzzleStations.delete(id);
+  }
+}
+
+function upsertPuzzleStationMesh(
+  scene: Scene,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+  station: PuzzleStationSnapshot,
+) {
+  const existing = puzzleStations.get(station.id);
+  if (existing) {
+    return existing;
+  }
+
+  // Reuse the same pedestal and hologram model in every world-facing scene.
+  const meshState = createWorldPuzzleStationMesh(scene, `puzzle-station-${station.id}`, station.kind);
+  puzzleStations.set(station.id, meshState);
+  return meshState;
+}
+
+function drawPuzzleProjection(meshState: PuzzleStationMeshState, projection: PuzzleProjectionState | null) {
+  const context = meshState.projectionTexture.getContext() as unknown as CanvasRenderingContext2D | null;
+  if (!projection || !context) {
+    meshState.projectionMesh.isVisible = false;
+    return;
+  }
+
+  if (projection.kind === "timer") {
+    drawTimerPuzzleScene(context, 1024, 1024, projection);
+  } else {
+    drawWiresPuzzleScene(context, 1024, 1024, projection, { fromIndex: null, pointerX: 0, pointerY: 0 });
+  }
+
+  meshState.projectionMesh.isVisible = true;
+  meshState.projectionTexture.update(false);
+}
+
+function setupPuzzlePointerInteraction(
+  scene: Scene,
+  canvas: HTMLCanvasElement,
+  network: NetworkClient,
+  localPlayerId: string | null,
+  session: SessionState,
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+) {
+  const observer = scene.onPointerObservable.add((pointerInfo) => {
+    if (pointerInfo.type !== PointerEventTypes.POINTERDOWN || !session.latestSnapshot || !localPlayerId) {
+      return;
+    }
+
+    const localPlayer = session.latestSnapshot.players.find((player) => player.id === localPlayerId);
+    if (!localPlayer || !canPlayerWorkPuzzle(session.phase, localPlayer)) {
+      return;
+    }
+
+    if (session.latestSnapshot.puzzleStations.some((station) => station.occupiedBy === localPlayerId)) {
+      return;
+    }
+
+    const pointerEvent = pointerInfo.event as PointerEvent;
+    const rect = canvas.getBoundingClientRect();
+    const pickX = ((pointerEvent.clientX - rect.left) / Math.max(1, rect.width)) * scene.getEngine().getRenderWidth();
+    const pickY = ((pointerEvent.clientY - rect.top) / Math.max(1, rect.height)) * scene.getEngine().getRenderHeight();
+    const pick = scene.pick(pickX, pickY, (mesh) => {
+      for (const state of puzzleStations.values()) {
+        if (mesh === state.mesh) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+    const stationId = pick?.pickedMesh ? findPuzzleStationIdByMesh(puzzleStations, pick.pickedMesh) : null;
+    if (!stationId) {
+      return;
+    }
+
+    const nearbyPuzzle = findNearbyPuzzle(localPlayer.x, localPlayer.z, localPlayer.id, session.latestSnapshot.puzzleStations);
+    if (!nearbyPuzzle || nearbyPuzzle.id !== stationId) {
+      return;
+    }
+
+    network.sendMessage({ type: "start_puzzle", stationId });
+  });
+
+  return () => {
+    scene.onPointerObservable.remove(observer);
+  };
+}
+
+function findPuzzleStationIdByMesh(
+  puzzleStations: Map<string, PuzzleStationMeshState>,
+  mesh: AbstractMesh,
+) {
+  for (const [id, state] of puzzleStations) {
+    if (state.mesh === mesh) {
+      return id;
+    }
+  }
+
+  return null;
+}
+
+function updatePuzzleModal(
+  puzzleModal: ReturnType<typeof createPuzzleModal>,
+  snapshot: WorldSnapshot | null,
+  localPlayerId: string | null,
+) {
+  if (!snapshot || !localPlayerId || snapshot.phase !== "playing") {
+    puzzleModal.update({ station: null, player: null });
+    return;
+  }
+
+  const player = snapshot.players.find((entry) => entry.id === localPlayerId) ?? null;
+  const station = snapshot.puzzleStations.find((entry) => entry.occupiedBy === localPlayerId) ?? null;
+  puzzleModal.update({ station, player });
+}
+
+function canPlayerWorkPuzzle(phase: GamePhase, player: SnapshotPlayer) {
+  return phase === "playing"
+    && (player.role === "crewmate" || player.role === "sheriff")
+    && (player.state === "alive" || player.state === "ghost");
+}
+
+function findNearbyPuzzle(
+  x: number,
+  z: number,
+  localPlayerId: string,
+  puzzleStations: PuzzleStationSnapshot[],
+) {
+  let nearest: PuzzleStationSnapshot | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const station of puzzleStations) {
+    if (station.occupiedBy !== null || station.completedBy.includes(localPlayerId)) {
+      continue;
+    }
+
+    const dx = station.x - x;
+    const dz = station.z - z;
+    const distanceSq = (dx * dx) + (dz * dz);
+    if (distanceSq > PUZZLE_INTERACTION_RANGE_SQ || distanceSq >= nearestDistance) {
+      continue;
+    }
+
+    nearest = station;
+    nearestDistance = distanceSq;
+  }
+
+  return nearest;
+}
+
 function applySabotageVisuals(
   scene: Scene,
+  arena: ReturnType<typeof createEnvironment>,
   players: Map<string, PlayerMeshState>,
   snapshot: WorldSnapshot | null,
 ) {
-  const grayPlayers = snapshot?.activeSabotages.some((sabotage) => sabotage.kind === "gray_players") ?? false;
-  const lightsOff = snapshot?.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ?? false;
-
-  scene.clearColor = lightsOff ? new Color4(0.05, 0.07, 0.13, 1) : new Color4(0.81, 0.89, 0.99, 1);
-
   if (!snapshot) {
     return;
   }
 
-  const snapshotPlayers = new Map(snapshot.players.map((player) => [player.id, player]));
-  for (const [id, state] of players) {
-    const snapshotPlayer = snapshotPlayers.get(id);
-    if (!snapshotPlayer) continue;
-
-    state.material.diffuseColor = grayPlayers
-      ? Color3.FromHexString("#8e909a")
-      : Color3.FromHexString(snapshotPlayer.color);
-  }
+  applyWorldTheme(scene, arena, snapshot.phase, snapshot.activeSabotages);
+  applyGrayPlayerTint(players, snapshot.players, snapshot.activeSabotages);
 }
 
 function createHud(): HudState {
@@ -579,9 +805,24 @@ function createHud(): HudState {
   meeting.style.display = "none";
   meeting.style.pointerEvents = "auto";
 
+  // Keep gameplay buttons mounted so pointer interactions survive render updates.
+  const reportButton = createHudButton("Report");
+  const killButton = createHudButton("Kill");
+  const lightsButton = createHudButton("Lights");
+  const grayButton = createHudButton("Gray");
+  const puzzleButton = createHudButton("Puzzle");
+
+  actions.append(
+    reportButton.button,
+    killButton.button,
+    lightsButton.button,
+    grayButton.button,
+    puzzleButton.button,
+  );
+
   root.append(status, actions, meeting);
   document.body.appendChild(root);
-  return { root, status, actions, meeting };
+  return { root, status, actions, meeting, reportButton, killButton, lightsButton, grayButton, puzzleButton };
 }
 
 function updateHud(
@@ -601,35 +842,55 @@ function updateHud(
   const nearbyTarget = snapshot && localPlayer && localX !== undefined && localZ !== undefined
     ? findNearbyAliveTarget(localX, localZ, localPlayer.id, snapshot.players)
     : null;
+  const nearbyPuzzle = snapshot && localPlayer && localX !== undefined && localZ !== undefined
+    ? findNearbyPuzzle(localX, localZ, localPlayer.id, snapshot.puzzleStations)
+    : null;
+  const activePuzzle = snapshot?.puzzleStations.find((station) => station.occupiedBy === localPlayerId) ?? null;
   const isAlive = session.phase === "playing" && localPlayer?.state === "alive";
+  const canWorkPuzzle = localPlayer ? canPlayerWorkPuzzle(session.phase, localPlayer) : false;
+  const killCooldownRemainingMs = Math.max(0, (localPlayer?.killCooldownEndsAt ?? 0) - (snapshot?.serverTime ?? 0));
+  const killCooldownRemainingSeconds = Math.ceil(killCooldownRemainingMs / 1000);
   const canReport = isAlive && nearbyBody !== null;
-  const canKill = isAlive && nearbyTarget !== null && (session.localRole === "imposter" || session.localRole === "sheriff");
+  const canKill = isAlive
+    && killCooldownRemainingMs <= 0
+    && nearbyTarget !== null
+    && (session.localRole === "imposter" || session.localRole === "sheriff");
   const canSabotage = isAlive && session.localRole === "imposter";
 
   hud.status.innerHTML = [
     `<strong>Phase:</strong> ${session.phase}`,
     `<strong>Role:</strong> ${session.localRole ?? "pending"}`,
+    localPlayer ? `<strong>Tasks:</strong> ${localPlayer.completedPuzzleCount}/${localPlayer.totalPuzzleCount}` : "",
     session.notice,
-  ].join("<br />");
+  ].filter(Boolean).join("<br />");
 
-  hud.actions.replaceChildren();
-  // Keep the action bar stable so the player always sees the full set of buttons.
-  hud.actions.append(
-    createHudButton("Report", canReport, () => {
-      if (!nearbyBody) return;
-      network.sendMessage({ type: "report_body", bodyId: nearbyBody.id });
-    }),
-    createHudButton("Kill", canKill, () => {
-      if (!nearbyTarget) return;
-      network.sendMessage({ type: "kill", targetId: nearbyTarget.id });
-    }),
-    createHudButton("Lights", canSabotage, () => {
-      network.sendMessage({ type: "sabotage", kind: "lights_off" });
-    }),
-    createHudButton("Gray", canSabotage, () => {
-      network.sendMessage({ type: "sabotage", kind: "gray_players" });
-    }),
-  );
+  // Only mutate button state so active presses are not interrupted by DOM replacement.
+  hud.reportButton.setEnabled(canReport);
+  hud.reportButton.setAction(nearbyBody ? () => {
+    network.sendMessage({ type: "report_body", bodyId: nearbyBody.id });
+  } : null);
+
+  hud.killButton.setLabel(killCooldownRemainingSeconds > 0 ? `Kill (${killCooldownRemainingSeconds}s)` : "Kill");
+  hud.killButton.setEnabled(canKill);
+  hud.killButton.setAction(canKill && nearbyTarget ? () => {
+    network.sendMessage({ type: "kill", targetId: nearbyTarget.id });
+  } : null);
+
+  hud.lightsButton.setEnabled(canSabotage);
+  hud.lightsButton.setAction(canSabotage ? () => {
+    network.sendMessage({ type: "sabotage", kind: "lights_off" });
+  } : null);
+
+  hud.grayButton.setEnabled(canSabotage);
+  hud.grayButton.setAction(canSabotage ? () => {
+    network.sendMessage({ type: "sabotage", kind: "gray_players" });
+  } : null);
+
+  hud.puzzleButton.setLabel(activePuzzle ? "Puzzle Active" : nearbyPuzzle ? `Use ${nearbyPuzzle.kind}` : "Puzzle");
+  hud.puzzleButton.setEnabled(canWorkPuzzle && nearbyPuzzle !== null && activePuzzle === null);
+  hud.puzzleButton.setAction(canWorkPuzzle && nearbyPuzzle && activePuzzle === null ? () => {
+    network.sendMessage({ type: "start_puzzle", stationId: nearbyPuzzle.id });
+  } : null);
 
   if (snapshot?.phase === "meeting" && localPlayer?.state === "alive") {
     hud.meeting.style.display = "block";
@@ -640,23 +901,44 @@ function updateHud(
   }
 }
 
-function createHudButton(label: string, enabled: boolean, onClick: () => void) {
+function createHudButton(label: string): HudButtonState {
   const button = document.createElement("button");
+  let action: (() => void) | null = null;
+
   button.textContent = label;
   button.style.padding = "0.8rem 1rem";
   button.style.border = "0";
   button.style.borderRadius = "999px";
-  button.style.background = enabled ? "#f35f7d" : "#6a7280";
+  button.style.background = "#6a7280";
   button.style.color = "white";
   button.style.fontWeight = "700";
-  button.style.cursor = enabled ? "pointer" : "not-allowed";
-  button.style.opacity = enabled ? "1" : "0.45";
-  button.disabled = !enabled;
-  button.onclick = () => {
-    if (!enabled) return;
-    onClick();
+  button.style.cursor = "not-allowed";
+  button.style.opacity = "0.45";
+  button.disabled = true;
+  button.style.touchAction = "manipulation";
+
+  // Fire on pointer down so taps are not lost to click synthesis on mobile.
+  button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    if (button.disabled || !action) return;
+    action();
+  });
+
+  return {
+    button,
+    setEnabled(enabled: boolean) {
+      button.style.background = enabled ? "#f35f7d" : "#6a7280";
+      button.style.cursor = enabled ? "pointer" : "not-allowed";
+      button.style.opacity = enabled ? "1" : "0.45";
+      button.disabled = !enabled;
+    },
+    setLabel(label: string) {
+      button.textContent = label;
+    },
+    setAction(nextAction: (() => void) | null) {
+      action = nextAction;
+    },
   };
-  return button;
 }
 
 function renderMeetingHud(
@@ -674,17 +956,24 @@ function renderMeetingHud(
 
   for (const player of snapshot.players.filter((entry) => entry.state === "alive" && entry.id !== localPlayerId)) {
     root.appendChild(
-      createHudButton(`Vote ${player.name}`, true, () => {
+      createMeetingButton(`Vote ${player.name}`, () => {
         network.sendMessage({ type: "vote", target: player.id });
       }),
     );
   }
 
   root.appendChild(
-    createHudButton("Skip", true, () => {
+    createMeetingButton("Skip", () => {
       network.sendMessage({ type: "vote", target: "skip" });
     }),
   );
+}
+
+function createMeetingButton(label: string, onClick: () => void) {
+  const state = createHudButton(label);
+  state.setEnabled(true);
+  state.setAction(onClick);
+  return state.button;
 }
 
 function findNearbyBody(x: number, z: number, bodies: SnapshotDeadBody[]) {
@@ -728,7 +1017,6 @@ function distanceSq(ax: number, az: number, bx: number, bz: number) {
 function setupPlayerController() {
   const keys = new Set<string>();
   const joy = { x: 0, y: 0 };
-  let seq = 0;
 
   const onKeyDown = (event: KeyboardEvent) => keys.add(event.key);
   const onKeyUp = (event: KeyboardEvent) => keys.delete(event.key);
@@ -878,8 +1166,7 @@ function setupPlayerController() {
         inputZ = 0;
       }
 
-      seq += 1;
-      return { x: inputX, z: inputZ, seq };
+      return { x: inputX, z: inputZ };
     },
     dispose() {
       window.removeEventListener("keydown", onKeyDown);
