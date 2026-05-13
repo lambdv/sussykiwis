@@ -368,9 +368,10 @@ function syncWorld(
   puzzleStations: Map<string, PuzzleStationMeshState>,
   snapshot: WorldSnapshot,
 ) {
-  // Keep one mesh per player so the observer view always shows the full map.
+  // Keep one mesh per visible player so ghosts stay hidden in server view.
   const livePlayerIds = new Set<string>();
   for (const player of snapshot.players) {
+    if (!isVisibleServerPlayer(player)) continue;
     livePlayerIds.add(player.id);
     const meshState = upsertPlayer(scene, players, player);
     meshState.mesh.position.x = player.x;
@@ -524,6 +525,11 @@ function isTaskPlayer(player: WorldSnapshot["players"][number]) {
   return player.role === "crewmate" || player.role === "sheriff";
 }
 
+function isVisibleServerPlayer(player: WorldSnapshot["players"][number]) {
+  // Keep ghosts out of the projector so only active on-map players are shown there.
+  return player.state !== "ghost";
+}
+
 function updateHud(hud: HudState, state: ServerViewState) {
   // Keep the overlay focused on the state of the live server and lobby.
   hud.status.text = state.status;
@@ -554,6 +560,7 @@ function updateHud(hud: HudState, state: ServerViewState) {
   if (!state.snapshot) return;
 
   for (const player of state.snapshot.players) {
+    if (!isVisibleServerPlayer(player)) continue;
     // Show each player as a compact avatar chip for spectators.
     const row = new StackPanel();
     row.isVertical = false;

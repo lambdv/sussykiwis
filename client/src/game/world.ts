@@ -90,11 +90,12 @@ export function createSharedWorldCamera(scene: Scene, options: SharedCameraOptio
     camera.orthoTop = currentHalfHeight;
   });
 
+  // Always mark the shared world camera active so scene transitions never render without one.
+  scene.activeCamera = camera;
+
   if (options.canvas) {
     camera.attachControl(options.canvas, true);
     camera.inputs.clear();
-  } else {
-    scene.activeCamera = camera;
   }
 
   return {
