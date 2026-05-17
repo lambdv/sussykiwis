@@ -1,4 +1,3 @@
-import { NetworkClient } from "../../networking/client";
 import type { PuzzleStationSnapshot, SnapshotPlayer } from "../../networking/message";
 import { drawTimerPuzzleScene } from "./timerPuzzleScene";
 import { createWireLayout, drawWiresPuzzleScene, pickWireSocket } from "./wiresPuzzleScene";
@@ -8,7 +7,13 @@ type PuzzleModalState = {
   player: SnapshotPlayer | null;
 };
 
-export function createPuzzleModal(network: NetworkClient) {
+type PuzzleModalActions = {
+  onCancel: () => void;
+  onTap: () => void;
+  onConnect: (fromIndex: number, toIndex: number) => void;
+};
+
+export function createPuzzleModal(actions: PuzzleModalActions) {
   const root = document.createElement("div");
   const card = document.createElement("div");
   const title = document.createElement("div");
@@ -55,7 +60,7 @@ export function createPuzzleModal(network: NetworkClient) {
   closeButton.style.touchAction = "manipulation";
   closeButton.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    network.sendMessage({ type: "cancel_puzzle" });
+    actions.onCancel();
   });
 
   canvas.width = 900;
@@ -77,7 +82,7 @@ export function createPuzzleModal(network: NetworkClient) {
     dragState.pointerY = point.y;
 
     if (projection.kind === "timer") {
-      network.sendMessage({ type: "puzzle_tap" });
+      actions.onTap();
       return;
     }
 
@@ -114,11 +119,11 @@ export function createPuzzleModal(network: NetworkClient) {
     const layout = createWireLayout(canvas.width, canvas.height, projection);
     const toIndex = pickWireSocket(layout, "right", point.x, point.y);
     if (toIndex !== null) {
-      network.sendMessage({
-        type: "puzzle_connect",
-        fromIndex: dragState.fromIndex,
-        toIndex,
-      });
+      // Optimistic update
+      if (!projection.connectedPairs.some(p => p.fromIndex === dragState.fromIndex)) {
+          projection.connectedPairs.push({ fromIndex: dragState.fromIndex, toIndex });
+      }
+      actions.onConnect(dragState.fromIndex, toIndex);
     }
 
     dragState.fromIndex = null;

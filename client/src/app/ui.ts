@@ -1,3 +1,4 @@
+import QRCode from "qrcode";
 import { deriveHudState } from "../core/selectors";
 import { ClientSession, type ClientSessionState } from "../core/session";
 import { createPuzzleModal } from "../game/puzzles/puzzleModal";
@@ -125,8 +126,6 @@ export function createAppUi(session: ClientSession) {
       lobbyStatus ?? state.notice,
     ].filter(Boolean).join("<br />");
 
-    import QRCode from "qrcode";
-    
     spectator.style.display = state.viewMode === "spectator" && state.snapshot ? "block" : "none";
     if (state.viewMode === "spectator" && state.snapshot) {
       spectator.innerHTML = `<strong>Scan to Join!</strong><br /><canvas id="qrCanvas"></canvas><br /><strong>Joined players</strong><br />${state.snapshot.players.map((player) => player.name).join("<br />")}`;
