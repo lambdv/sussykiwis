@@ -1,18 +1,16 @@
 import {
   ArcRotateCamera,
   Camera,
-  Color3,
   Color4,
   Engine,
   HemisphericLight,
-  MeshBuilder,
   Scene,
-  StandardMaterial,
   Vector3,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { AdvancedDynamicTexture, Control, Rectangle, StackPanel, TextBlock } from "@babylonjs/gui";
 import type { WinSceneData } from "./gameScene";
+import { createWorldPlayerMesh } from "../world";
 
 type WinSceneCallbacks = {
   onDone: () => void;
@@ -38,11 +36,6 @@ export function createWinScene(
 
   const light = new HemisphericLight("win-light", new Vector3(0, 1, 0.2), scene);
   light.intensity = 1.2;
-
-  const ground = MeshBuilder.CreateGround("win-ground", { width: 64, height: 64 }, scene);
-  const groundMaterial = new StandardMaterial("win-ground-material", scene);
-  groundMaterial.diffuseColor = winningFaction === "crew" ? Color3.FromHexString("#17372f") : Color3.FromHexString("#3b1820");
-  ground.material = groundMaterial;
 
   const lineup = data?.snapshot.players.filter((player) => {
     return winningFaction === "crew" ? player.role !== "imposter" : player.role === "imposter";
@@ -87,6 +80,13 @@ export function createWinScene(
   hintBlock.height = "30px";
   panel.addControl(hintBlock);
 
+  let didAdvance = false;
+  const finish = () => {
+    if (didAdvance) return;
+    didAdvance = true;
+    callbacks.onDone();
+  };
+
   const button = document.createElement("button");
   button.textContent = "Back to lobby";
   button.style.position = "fixed";
@@ -100,18 +100,20 @@ export function createWinScene(
   button.style.background = "#ffffff";
   button.style.color = "#111827";
   button.style.fontWeight = "800";
-  button.onclick = () => callbacks.onDone();
+  button.onclick = finish;
   document.body.appendChild(button);
 
-  const advance = () => callbacks.onDone();
-  scene.onPointerDown = advance;
-  window.addEventListener("keydown", advance);
+  // Auto-return to the lobby after a short pause so rounds flow back into matchmaking.
+  const timeout = window.setTimeout(finish, 3000);
+  scene.onPointerDown = finish;
+  window.addEventListener("keydown", finish);
 
-  scene.onDisposeObservable.add(() => {
+scene.onDisposeObservable.add(() => {
+    window.clearTimeout(timeout);
     button.remove();
-    window.removeEventListener("keydown", advance);
+    window.removeEventListener("keydown", finish);
+    scene.onPointerDown = undefined;
     ui.dispose();
-    ground.dispose();
   });
 
   return scene;
@@ -123,11 +125,7 @@ function createWinFigures(scene: Scene, players: { name: string; color: string; 
   const z = winner === "crew" ? 4 : -4;
 
   players.forEach((player, index) => {
-    const mesh = MeshBuilder.CreateCapsule(`win-player-${index}`, { height: 2.4, radius: 0.85 }, scene);
+    const mesh = createWorldPlayerMesh(scene, `win-player-${index}`, player.color).mesh;
     mesh.position.set(baseX + index * 3, y, z + Math.sin(index) * 0.3);
-
-    const material = new StandardMaterial(`win-player-material-${index}`, scene);
-    material.diffuseColor = Color3.FromHexString(player.color);
-    mesh.material = material;
   });
 }

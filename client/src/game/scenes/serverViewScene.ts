@@ -3,6 +3,7 @@ import {
   Mesh,
   Scene,
   StandardMaterial,
+  TransformNode,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { AdvancedDynamicTexture, Control, Image, Rectangle, StackPanel, TextBlock } from "@babylonjs/gui";
@@ -15,6 +16,7 @@ import { drawWiresPuzzleScene } from "../puzzles/wiresPuzzleScene";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
 import { createMeetingOverlay } from "../ui/meetingOverlay";
 import {
+  applyPlayerFacing,
   applyGrayPlayerTint,
   applyWorldTheme,
   createSharedWorldArena,
@@ -30,8 +32,7 @@ import {
 } from "../world";
 
 type PlayerMeshState = {
-  mesh: Mesh;
-  material: StandardMaterial;
+  mesh: TransformNode;
   tag: PlayerTagState;
 };
 
@@ -112,7 +113,6 @@ export function createServerViewScene(
 
     for (const player of players.values()) {
       player.mesh.dispose();
-      player.material.dispose();
     }
 
     for (const body of bodies.values()) {
@@ -376,6 +376,7 @@ function syncWorld(
     const meshState = upsertPlayer(scene, players, player);
     meshState.mesh.position.x = player.x;
     meshState.mesh.position.z = player.z;
+    applyPlayerFacing(meshState.mesh, player.facingYaw);
     setMeshHeight(meshState.mesh, player.state);
   }
 
@@ -402,13 +403,14 @@ function upsertPlayer(scene: Scene, players: Map<string, PlayerMeshState>, playe
   let state = players.get(player.id);
   if (state) return state;
 
-  // Render each player as a color-coded marker that reads clearly from far away.
-  const { mesh, material } = createWorldPlayerMesh(scene, `server-view-player-${player.id}`, player.color);
+  // Render each player as a kiwi model keyed from the authoritative snapshot color.
+  const { mesh } = createWorldPlayerMesh(scene, `server-view-player-${player.id}`, player.color);
+  applyPlayerFacing(mesh, player.facingYaw);
 
   const tag = createPlayerTag(scene, player.id, player.name);
   tag.mesh.parent = mesh;
 
-  state = { mesh, material, tag };
+  state = { mesh, tag };
   players.set(player.id, state);
   return state;
 }
@@ -430,7 +432,6 @@ function cleanupPlayers(players: Map<string, PlayerMeshState>, liveIds: Set<stri
   for (const [id, state] of players) {
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
-    state.material.dispose();
     state.tag.mesh.dispose();
     state.tag.material.dispose();
     state.tag.texture.dispose();

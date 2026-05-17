@@ -254,6 +254,7 @@ pub mod model {
         pub role: PlayerRole,
         pub x: f32,
         pub z: f32,
+        pub facing_yaw: f32,
         pub state: PlayerState,
         pub kill_cooldown_ends_at: u64,
         pub last_processed_seq: u32,

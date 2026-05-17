@@ -7,7 +7,7 @@ import {
   Mesh,
   PointerEventTypes,
   Scene,
-  StandardMaterial,
+  TransformNode,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { NetworkClient } from "../../networking/client";
@@ -29,6 +29,7 @@ import { drawWiresPuzzleScene } from "../puzzles/wiresPuzzleScene";
 import { cameraRelativeMovement } from "../cameraMovement";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
 import {
+  applyPlayerFacing,
   applyGrayPlayerTint,
   applyWorldTheme,
   clampPositionToPhaseBounds,
@@ -39,7 +40,9 @@ import {
   createWorldPuzzleStationMesh,
   createWorldPlayerMesh,
   DEFAULT_MAP_HALF_EXTENT,
+  getFacingYawFromMovement,
   getSnapshotMapHalfExtent,
+  lerpAngle,
   setMeshHeight,
   type WorldPuzzleStationMesh,
 } from "../world";
@@ -55,11 +58,10 @@ const KILL_INTERACTION_RANGE_SQ = 36;
 const PUZZLE_INTERACTION_RANGE_SQ = 20.25;
 const CAMERA_ORTHO_HALF_HEIGHT = 28;
 
-type RemoteSnapshot = { time: number; x: number; z: number };
+type RemoteSnapshot = { time: number; x: number; z: number; facingYaw: number };
 
 type PlayerMeshState = {
-  mesh: Mesh;
-  material: StandardMaterial;
+  mesh: TransformNode;
   tag: PlayerTagState;
   snapshots: RemoteSnapshot[];
 };
@@ -70,7 +72,7 @@ type BodyMeshState = {
 
 type PuzzleStationMeshState = WorldPuzzleStationMesh;
 
-type PendingInput = { seq: number; moveX: number; moveZ: number; dt: number };
+type PendingInput = { seq: number; moveX: number; moveZ: number; dt: number; facingYaw: number | null };
 
 type SessionState = {
   latestServerTime: number;
@@ -172,7 +174,6 @@ export async function createGameScene(
     puzzleModal.dispose();
     for (const player of players.values()) {
       player.mesh.dispose();
-      player.material.dispose();
     }
     for (const body of bodies.values()) {
       body.mesh.dispose();
@@ -327,6 +328,7 @@ function handleSnapshot(
         time: snapshot.serverTime,
         x: snapshotPlayer.x,
         z: snapshotPlayer.z,
+        facingYaw: snapshotPlayer.facingYaw,
       });
 
       if (state.snapshots.length > 10) {
@@ -335,6 +337,9 @@ function handleSnapshot(
     }
 
     setMeshHeight(state.mesh, snapshotPlayer.state);
+    if (snapshotPlayer.id !== localPlayerId) {
+      applyPlayerFacing(state.mesh, snapshotPlayer.facingYaw);
+    }
   }
 
   cleanupDisconnectedPlayers(players, livePlayerIds);
@@ -367,6 +372,7 @@ function handleLocalPlayerMovement(
   const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
   const ix = movement.x;
   const iz = movement.z;
+  const facingYaw = (ix * ix) + (iz * iz) > 0 ? getFacingYawFromMovement(ix, iz) : null;
 
   const localState = localPlayerId ? players.get(localPlayerId) : undefined;
   const localPlayer = localPlayerId ? session.latestSnapshot?.players.find((player) => player.id === localPlayerId) : undefined;
@@ -381,7 +387,11 @@ function handleLocalPlayerMovement(
     );
     localState.mesh.position.x = clamped.x;
     localState.mesh.position.z = clamped.z;
-    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt });
+    if (facingYaw !== null) {
+      // Keep predicted facing aligned with the latest movement input.
+      applyPlayerFacing(localState.mesh, facingYaw);
+    }
+    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt, facingYaw });
   }
 
   if (localState) {
@@ -411,6 +421,7 @@ function reconcileLocalPlayer(
 ) {
   let targetX = snapshotPlayer.x;
   let targetZ = snapshotPlayer.z;
+  let targetFacingYaw = snapshotPlayer.facingYaw;
 
   while (pendingInputs.length > 0 && pendingInputs[0].seq <= snapshotPlayer.lastProcessedSeq) {
     pendingInputs.shift();
@@ -419,6 +430,9 @@ function reconcileLocalPlayer(
   for (const input of pendingInputs) {
     targetX += input.moveX * moveSpeed * input.dt;
     targetZ += input.moveZ * moveSpeed * input.dt;
+    if (input.facingYaw !== null) {
+      targetFacingYaw = input.facingYaw;
+    }
   }
 
   const clamped = clampPositionToPhaseBounds(targetX, targetZ, mapHalfExtent, phase);
@@ -433,6 +447,8 @@ function reconcileLocalPlayer(
     state.mesh.position.x = targetX;
     state.mesh.position.z = targetZ;
   }
+
+  applyPlayerFacing(state.mesh, targetFacingYaw);
 }
 
 function updateRenderTime(session: SessionState, dt: number) {
@@ -463,6 +479,7 @@ function interpolateRemotePlayers(
     } else if (clientRenderTime < snaps[0].time) {
       state.mesh.position.x = snaps[0].x;
       state.mesh.position.z = snaps[0].z;
+      applyPlayerFacing(state.mesh, snaps[0].facingYaw);
     } else {
       interpolateBetweenSnapshots(state, snaps, clientRenderTime);
     }
@@ -489,6 +506,8 @@ function extrapolateRemotePlayer(state: PlayerMeshState, snaps: RemoteSnapshot[]
     state.mesh.position.x = last.x;
     state.mesh.position.z = last.z;
   }
+
+  applyPlayerFacing(state.mesh, last.facingYaw);
 }
 
 function interpolateBetweenSnapshots(state: PlayerMeshState, snaps: RemoteSnapshot[], clientRenderTime: number) {
@@ -507,6 +526,7 @@ function interpolateBetweenSnapshots(state: PlayerMeshState, snaps: RemoteSnapsh
   const alpha = timeDiff > 0 ? (clientRenderTime - prev.time) / timeDiff : 0;
   state.mesh.position.x = prev.x + (next.x - prev.x) * alpha;
   state.mesh.position.z = prev.z + (next.z - prev.z) * alpha;
+  applyPlayerFacing(state.mesh, lerpAngle(prev.facingYaw, next.facingYaw, alpha));
 }
 
 function upsertPlayerMesh(
@@ -519,13 +539,14 @@ function upsertPlayerMesh(
     return existing;
   }
 
-  const { mesh, material } = createWorldPlayerMesh(scene, `player-${snapshotPlayer.id}`, snapshotPlayer.color);
+  const { mesh } = createWorldPlayerMesh(scene, `player-${snapshotPlayer.id}`, snapshotPlayer.color);
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
+  applyPlayerFacing(mesh, snapshotPlayer.facingYaw);
 
   const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
   tag.mesh.parent = mesh;
 
-  const playerState = { mesh, material, tag, snapshots: [] };
+  const playerState = { mesh, tag, snapshots: [] };
   players.set(snapshotPlayer.id, playerState);
   return playerState;
 }
@@ -557,7 +578,6 @@ function cleanupDisconnectedPlayers(players: Map<string, PlayerMeshState>, liveI
   for (const [id, state] of players) {
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
-    state.material.dispose();
     state.tag.mesh.dispose();
     state.tag.material.dispose();
     state.tag.texture.dispose();

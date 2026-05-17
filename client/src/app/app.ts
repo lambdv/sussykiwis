@@ -15,6 +15,8 @@ import type { WinSceneData } from "../game/scenes/gameScene";
 
 export type AppState = "menu" | "queue" | "preMatch" | "roleAssignment" | "game" | "meeting" | "ejected" | "noEjection" | "win" | "serverView";
 
+type QueueMode = "join" | "lobby";
+
 export class App {
   private router: Router;
 
@@ -51,6 +53,7 @@ export class Router {
   private localPlayerId: string | null = null;
   private localRole: PlayerRole | null = null;
   private lastWinData: WinSceneData | null = null;
+  private queueMode: QueueMode = "join";
 
   constructor(
     private engine: Engine | WebGPUEngine,
@@ -84,14 +87,23 @@ export class Router {
     switch (key) {
       case "menu":
         this.currentScene = createMenuScene(this.engine, {
-          onPlay: () => this.goTo("queue"),
+          onPlay: () => {
+            this.queueMode = "join";
+            void this.goTo("queue");
+          },
         });
         break;
 
       case "queue":
-        this.network.disconnect();
         this.currentScene = createQueueScene(this.engine, {
           onEnter: () => {
+            if (this.queueMode === "lobby" && this.network.isConnected()) {
+              // Re-enter the live lobby without tearing down the active game socket.
+              void this.goTo("preMatch");
+              return;
+            }
+
+            this.network.disconnect();
             // Start the join handshake while queue scene is shown.
             void this.joinAndEnterGame(this.transitionToken);
           },
@@ -184,7 +196,10 @@ export class Router {
 
       case "win":
         this.currentScene = createWinScene(this.engine, this.canvas, this.lastWinData, {
-          onDone: () => void this.goTo("queue"),
+          onDone: () => {
+            this.queueMode = "lobby";
+            void this.goTo("queue");
+          },
         });
         break;
 

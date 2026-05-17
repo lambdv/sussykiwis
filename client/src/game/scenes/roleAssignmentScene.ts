@@ -10,6 +10,7 @@ import {
   Scene,
   StandardMaterial,
   Vector3,
+  TransformNode,
   WebGPUEngine,
 } from "@babylonjs/core";
 import {
@@ -22,6 +23,7 @@ import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTextur
 import { NetworkClient } from "../../networking/client";
 import type { PlayerRole, ServerMessage, WorldSnapshot } from "../../networking/message";
 import type { WinSceneData } from "./gameScene";
+import { createWorldPlayerMesh } from "../world";
 
 type RoleAssignmentSceneCallbacks = {
   onDone: () => void;
@@ -37,9 +39,10 @@ type RevealState = {
 };
 
 type PlayerFigure = {
-  mesh: Mesh;
+  mesh: TransformNode;
   nameMesh: Mesh;
   nameTexture: DynamicTexture;
+  color: string;
   drawName: (name: string, color: string) => void;
 };
 
@@ -176,10 +179,8 @@ function startRevealTimer(state: RevealState, callbacks: RoleAssignmentSceneCall
   }, durationMs);
 }
 
-function createFigure(scene: Scene, idx: number): PlayerFigure {
-  const mesh = MeshBuilder.CreateCapsule(`figure-${idx}`, { height: 3.2, radius: 1 }, scene);
-  const material = new StandardMaterial(`figure-mat-${idx}`, scene);
-  mesh.material = material;
+function createFigure(scene: Scene, idx: number, color: string): PlayerFigure {
+  const mesh = createWorldPlayerMesh(scene, `figure-${idx}`, color).mesh;
 
   const nameMesh = MeshBuilder.CreatePlane(`name-plane-${idx}`, { width: 3.2, height: 0.85 }, scene);
   nameMesh.billboardMode = Mesh.BILLBOARDMODE_ALL;
@@ -200,7 +201,7 @@ function createFigure(scene: Scene, idx: number): PlayerFigure {
     nameTexture.drawText(name, 256, 86, "bold 64px Arial", color, "transparent", true);
   };
 
-  return { mesh, nameMesh, nameTexture, drawName };
+  return { mesh, nameMesh, nameTexture, color, drawName };
 }
 
 function updateScene(
@@ -245,7 +246,7 @@ function updateScene(
 
   while (figures.length < totalPlayers) {
     const idx = figures.length;
-    figures.push(createFigure(scene, idx));
+    figures.push(createFigure(scene, idx, playersToShow[idx].color));
   }
 
   while (figures.length > totalPlayers) {
@@ -269,12 +270,18 @@ function updateScene(
     const isLocal = player.id === localPlayerId;
 
     f.mesh.position.set(x, 1.6, 0);
-    f.mesh.isVisible = true;
+    f.mesh.setEnabled(true);
 
     f.nameMesh.position.set(x, 4.5, 0);
     f.nameMesh.isVisible = true;
 
-    (f.mesh.material as StandardMaterial).diffuseColor = Color3.FromHexString(player.color);
+    if (f.color !== player.color) {
+      f.mesh.dispose();
+      f.mesh = createWorldPlayerMesh(scene, `figure-${idx}`, player.color).mesh;
+      f.color = player.color;
+      f.mesh.position.set(x, 1.6, 0);
+    }
+
     f.drawName(player.name, isLocal ? "#fbbf24" : "#f1f5f9");
   });
 }

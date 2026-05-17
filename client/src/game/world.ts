@@ -1,4 +1,5 @@
 import {
+  AbstractMesh,
   ArcRotateCamera,
   Camera,
   Color3,
@@ -7,10 +8,13 @@ import {
   Mesh,
   MeshBuilder,
   Scene,
+  SceneLoader,
   StandardMaterial,
+  TransformNode,
   Vector3,
 } from "@babylonjs/core";
 import { DynamicTexture } from "@babylonjs/core/Materials/Textures/dynamicTexture";
+import "@babylonjs/loaders/OBJ";
 import type { GamePhase, PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
 
 export const DEFAULT_MAP_HALF_EXTENT = 30;
@@ -61,6 +65,22 @@ export type WorldPuzzleStationMesh = {
   setStatus: (completed: boolean, occupied: boolean) => void;
 };
 
+type KiwiVariant = {
+  fileName: string;
+};
+
+const KIWI_FALLBACK_VARIANT: KiwiVariant = { fileName: "kiwiBlack.obj" };
+const KIWI_VARIANTS: Record<string, KiwiVariant> = {
+  "#ef4444": { fileName: "KiwiPink.obj" },
+  "#3b82f6": { fileName: "kiwiBlue.obj" },
+  "#22c55e": { fileName: "kiwiGreenobj.obj" },
+  "#eab308": { fileName: "kiwiGold.obj" },
+  "#a855f7": { fileName: "kiwiPurple.obj" },
+  "#f97316": { fileName: "kiwiOrange.obj" },
+};
+const KIWI_ASSET_BASE_URL = "/assets/kiwis/";
+const kiwiTemplateCache = new Map<string, Promise<AbstractMesh[]>>();
+
 export function createSharedWorldCamera(scene: Scene, options: SharedCameraOptions): SharedCameraState {
   // Keep every world scene on the same orthographic isometric camera model.
   const camera = new ArcRotateCamera(
@@ -72,6 +92,7 @@ export function createSharedWorldCamera(scene: Scene, options: SharedCameraOptio
     scene,
   );
   let currentHalfHeight = options.halfHeight;
+  const shouldUseMobileZoom = typeof window !== "undefined" && options.canvas !== undefined;
 
   camera.lowerAlphaLimit = camera.upperAlphaLimit = camera.alpha;
   camera.lowerBetaLimit = camera.upperBetaLimit = camera.beta;
@@ -80,14 +101,15 @@ export function createSharedWorldCamera(scene: Scene, options: SharedCameraOptio
   scene.onBeforeRenderObservable.add(() => {
     // Keep world units stable across aspect ratios so server and player views frame identically.
     const engine = scene.getEngine();
-    const width = Math.max(1, engine.getRenderWidth());
-    const height = Math.max(1, engine.getRenderHeight());
+    const width = Math.max(1, options.canvas?.clientWidth ?? engine.getRenderWidth());
+    const height = Math.max(1, options.canvas?.clientHeight ?? engine.getRenderHeight());
     const aspect = width / height;
-    const halfWidth = currentHalfHeight * aspect;
+    const halfHeight = getViewportScaledHalfHeight(currentHalfHeight, width, height, shouldUseMobileZoom);
+    const halfWidth = halfHeight * aspect;
     camera.orthoLeft = -halfWidth;
     camera.orthoRight = halfWidth;
-    camera.orthoBottom = -currentHalfHeight;
-    camera.orthoTop = currentHalfHeight;
+    camera.orthoBottom = -halfHeight;
+    camera.orthoTop = halfHeight;
   });
 
   // Always mark the shared world camera active so scene transitions never render without one.
@@ -104,6 +126,21 @@ export function createSharedWorldCamera(scene: Scene, options: SharedCameraOptio
       currentHalfHeight = halfHeight;
     },
   };
+}
+
+function getViewportScaledHalfHeight(baseHalfHeight: number, width: number, height: number, enabled: boolean) {
+  // Pull the camera closer on compact screens while preserving desktop framing.
+  if (!enabled) {
+    return baseHalfHeight;
+  }
+
+  const shortEdge = Math.min(width, height);
+  const maxShortEdge = 1080;
+  const minShortEdge = 540;
+  const clampedShortEdge = Math.min(maxShortEdge, Math.max(minShortEdge, shortEdge));
+  const t = (clampedShortEdge - minShortEdge) / (maxShortEdge - minShortEdge);
+const mobileScale = 0.5  * t;
+return baseHalfHeight * mobileScale;
 }
 
 export function createWorldLight(scene: Scene) {
@@ -184,12 +221,11 @@ export function createSharedWorldArena(scene: Scene, options: SharedArenaOptions
 }
 
 export function createWorldPlayerMesh(scene: Scene, name: string, color: string) {
-  // Render all live player avatars with the same mesh silhouette in every world scene.
-  const mesh = MeshBuilder.CreateSphere(name, { diameter: 2.6 }, scene);
-  const material = new StandardMaterial(`${name}-material`, scene);
-  material.diffuseColor = safeColor(color, Color3.FromHexString("#94a3b8"));
-  mesh.material = material;
-  return { mesh, material };
+  // Create a stable root node immediately, then swap in the color-matched kiwi OBJ when it loads.
+  const mesh = new TransformNode(name, scene);
+  mesh.position.y = PLAYER_MESH_Y;
+  void attachKiwiVariant(scene, mesh, color);
+  return { mesh };
 }
 
 export function createWorldBodyMesh(scene: Scene, name: string) {
@@ -296,7 +332,7 @@ export function applyWorldTheme(
 }
 
 export function applyGrayPlayerTint(
-  players: Map<string, { material: StandardMaterial }>,
+  players: Map<string, { mesh: TransformNode }>,
   snapshotPlayers: SnapshotPlayer[],
   activeSabotages: WorldSnapshot["activeSabotages"],
 ) {
@@ -305,21 +341,39 @@ export function applyGrayPlayerTint(
   const playerById = new Map(snapshotPlayers.map((player) => [player.id, player]));
 
   for (const [id, state] of players) {
-    const snapshotPlayer = playerById.get(id);
-    if (!snapshotPlayer) continue;
-    state.material.diffuseColor = grayPlayers
-      ? Color3.FromHexString("#8e909a")
-      : safeColor(snapshotPlayer.color, Color3.FromHexString("#94a3b8"));
+    if (!playerById.has(id)) continue;
+
+    for (const child of state.mesh.getChildMeshes(false)) {
+      const material = child.material;
+      if (!(material instanceof StandardMaterial)) continue;
+      material.diffuseColor = grayPlayers ? Color3.FromHexString("#8e909a") : Color3.White();
+    }
   }
 }
 
-export function setMeshHeight(mesh: Mesh, playerState: SnapshotPlayer["state"] | SnapshotDeadBody["reported"]) {
+export function setMeshHeight(mesh: TransformNode, playerState: SnapshotPlayer["state"] | SnapshotDeadBody["reported"]) {
   if (typeof playerState === "boolean") {
     mesh.position.y = BODY_MESH_Y;
     return;
   }
 
   mesh.position.y = playerState === "ghost" ? GHOST_MESH_Y : PLAYER_MESH_Y;
+}
+
+export function applyPlayerFacing(mesh: TransformNode, facingYaw: number) {
+  // The kiwi asset faces 90 degrees right in model space, so offset it left for world-facing.
+  mesh.rotation.y = facingYaw - (Math.PI / 2);
+}
+
+export function getFacingYawFromMovement(moveX: number, moveZ: number) {
+  // Convert a world-space movement vector into the kiwi root yaw.
+  return Math.atan2(moveX, moveZ);
+}
+
+export function lerpAngle(start: number, end: number, alpha: number) {
+  // Interpolate through the shortest turn so remote players do not spin across wrap boundaries.
+  const delta = Math.atan2(Math.sin(end - start), Math.cos(end - start));
+  return start + delta * alpha;
 }
 
 function getWorldPalette(phase: GamePhase, lightsOff: boolean): WorldPalette {
@@ -353,10 +407,46 @@ function getWorldPalette(phase: GamePhase, lightsOff: boolean): WorldPalette {
   };
 }
 
-function safeColor(value: string, fallback: Color3) {
-  try {
-    return Color3.FromHexString(value);
-  } catch {
-    return fallback;
-  }
+function attachKiwiVariant(scene: Scene, mesh: TransformNode, color: string) {
+  const variant = getKiwiVariant(color);
+  void loadKiwiTemplate(scene, variant.fileName).then((meshes) => {
+    if (mesh.isDisposed()) return;
+
+    for (const templateMesh of meshes) {
+      const clone = templateMesh.clone(`${mesh.name}-clone`, mesh, true);
+      if (clone) {
+        // Re-enable the cloned render mesh because the cached template stays hidden in-scene.
+        clone.setEnabled(true);
+        clone.isVisible = true;
+        clone.isPickable = false;
+        // Keep per-clone materials independent so later effects do not mutate the shared template.
+        clone.material = clone.material?.clone(`${clone.name}-material`) ?? null;
+      }
+    }
+  });
+}
+
+function getKiwiVariant(color: string) {
+  const normalized = color.trim().toLowerCase();
+  return KIWI_VARIANTS[normalized] ?? KIWI_FALLBACK_VARIANT;
+}
+
+async function loadKiwiTemplate(scene: Scene, fileName: string) {
+  const cached = kiwiTemplateCache.get(fileName);
+  if (cached) return cached;
+
+  const promise = SceneLoader.ImportMeshAsync("", KIWI_ASSET_BASE_URL, fileName, scene).then((result) => {
+    const meshes = result.meshes.filter((mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0);
+    // Keep only renderable template meshes and hide them so clones own the visible scene state.
+    for (const m of result.meshes) {
+      m.setEnabled(false);
+      m.isPickable = false;
+      m.isVisible = false;
+      m.parent = null;
+    }
+    return meshes;
+  });
+
+  kiwiTemplateCache.set(fileName, promise);
+  return promise;
 }

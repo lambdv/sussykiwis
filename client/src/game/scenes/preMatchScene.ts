@@ -3,9 +3,8 @@ import {
   ArcRotateCamera,
   Color4,
   Engine,
-  Mesh,
   Scene,
-  StandardMaterial,
+  TransformNode,
   WebGPUEngine,
 } from "@babylonjs/core";
 import { NetworkClient } from "../../networking/client";
@@ -13,6 +12,7 @@ import type { PlayerRole, ServerMessage, SnapshotPlayer, WorldSnapshot } from ".
 import { cameraRelativeMovement } from "../cameraMovement";
 import { createPlayerTag, type PlayerTagState } from "../playerTag";
 import {
+  applyPlayerFacing,
   applyWorldTheme,
   clampPositionToPhaseBounds,
   createSharedWorldArena,
@@ -20,20 +20,21 @@ import {
   createWorldLight,
   createWorldPlayerMesh,
   DEFAULT_MAP_HALF_EXTENT,
+  getFacingYawFromMovement,
   getSnapshotMapHalfExtent,
+  lerpAngle,
   setMeshHeight,
 } from "../world";
 
-type RemoteSnapshot = { time: number; x: number; z: number };
+type RemoteSnapshot = { time: number; x: number; z: number; facingYaw: number };
 
 type PlayerMeshState = {
-  mesh: Mesh;
-  material: StandardMaterial;
+  mesh: TransformNode;
   tag: PlayerTagState;
   snapshots: RemoteSnapshot[];
 };
 
-type PendingInput = { seq: number; moveX: number; moveZ: number; dt: number };
+type PendingInput = { seq: number; moveX: number; moveZ: number; dt: number; facingYaw: number | null };
 
 type SessionState = {
   latestServerTime: number;
@@ -106,7 +107,6 @@ export async function createPreMatchScene(
     hud.root.remove();
     for (const player of players.values()) {
       player.mesh.dispose();
-      player.material.dispose();
     }
     players.clear();
   });
@@ -193,6 +193,7 @@ function handleSnapshot(
         time: snapshot.serverTime,
         x: snapshotPlayer.x,
         z: snapshotPlayer.z,
+        facingYaw: snapshotPlayer.facingYaw,
       });
 
       if (state.snapshots.length > 10) {
@@ -201,6 +202,9 @@ function handleSnapshot(
     }
 
     setMeshHeight(state.mesh, snapshotPlayer.state);
+    if (snapshotPlayer.id !== localPlayerId) {
+      applyPlayerFacing(state.mesh, snapshotPlayer.facingYaw);
+    }
   }
 
   cleanupDisconnectedPlayers(players, livePlayerIds);
@@ -221,6 +225,7 @@ function handleLocalPlayerMovement(
   const movement = cameraRelativeMovement(input.x, input.z, camera.alpha);
   const ix = movement.x;
   const iz = movement.z;
+  const facingYaw = (ix * ix) + (iz * iz) > 0 ? getFacingYawFromMovement(ix, iz) : null;
   const localState = localPlayerId ? players.get(localPlayerId) : undefined;
 
   if (localPlayerId && localState) {
@@ -233,7 +238,11 @@ function handleLocalPlayerMovement(
     );
     localState.mesh.position.x = clamped.x;
     localState.mesh.position.z = clamped.z;
-    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt });
+    if (facingYaw !== null) {
+      // Keep lobby prediction facing aligned with the latest movement input.
+      applyPlayerFacing(localState.mesh, facingYaw);
+    }
+    session.pendingInputs.push({ seq, moveX: ix, moveZ: iz, dt, facingYaw });
     if (session.pendingInputs.length > 120) {
       session.pendingInputs.shift();
     }
@@ -262,6 +271,7 @@ function reconcileLocalPlayer(
   // Reconcile local prediction against authoritative server input acknowledgements.
   let targetX = snapshotPlayer.x;
   let targetZ = snapshotPlayer.z;
+  let targetFacingYaw = snapshotPlayer.facingYaw;
 
   while (pendingInputs.length > 0 && pendingInputs[0].seq <= snapshotPlayer.lastProcessedSeq) {
     pendingInputs.shift();
@@ -270,6 +280,9 @@ function reconcileLocalPlayer(
   for (const input of pendingInputs) {
     targetX += input.moveX * moveSpeed * input.dt;
     targetZ += input.moveZ * moveSpeed * input.dt;
+    if (input.facingYaw !== null) {
+      targetFacingYaw = input.facingYaw;
+    }
   }
 
   const clamped = clampPositionToPhaseBounds(targetX, targetZ, mapHalfExtent, "lobby");
@@ -284,6 +297,8 @@ function reconcileLocalPlayer(
     state.mesh.position.x = clampedX;
     state.mesh.position.z = clampedZ;
   }
+
+  applyPlayerFacing(state.mesh, targetFacingYaw);
 }
 
 function updateRenderTime(session: SessionState, dt: number) {
@@ -315,9 +330,11 @@ function interpolateRemotePlayers(
       const last = snaps[snaps.length - 1];
       state.mesh.position.x = last.x;
       state.mesh.position.z = last.z;
+      applyPlayerFacing(state.mesh, last.facingYaw);
     } else if (clientRenderTime < snaps[0].time) {
       state.mesh.position.x = snaps[0].x;
       state.mesh.position.z = snaps[0].z;
+      applyPlayerFacing(state.mesh, snaps[0].facingYaw);
     } else {
       let prev = snaps[0];
       let next = snaps[0];
@@ -334,6 +351,7 @@ function interpolateRemotePlayers(
       const alpha = timeDiff > 0 ? (clientRenderTime - prev.time) / timeDiff : 0;
       state.mesh.position.x = prev.x + (next.x - prev.x) * alpha;
       state.mesh.position.z = prev.z + (next.z - prev.z) * alpha;
+      applyPlayerFacing(state.mesh, lerpAngle(prev.facingYaw, next.facingYaw, alpha));
     }
   }
 }
@@ -349,13 +367,14 @@ function upsertPlayerMesh(
     return existing;
   }
 
-  const { mesh, material } = createWorldPlayerMesh(scene, `prematch-player-${snapshotPlayer.id}`, snapshotPlayer.color);
+  const { mesh } = createWorldPlayerMesh(scene, `prematch-player-${snapshotPlayer.id}`, snapshotPlayer.color);
   mesh.position.set(snapshotPlayer.x, 2, snapshotPlayer.z);
+  applyPlayerFacing(mesh, snapshotPlayer.facingYaw);
 
   const tag = createPlayerTag(scene, snapshotPlayer.id, snapshotPlayer.name);
   tag.mesh.parent = mesh;
 
-  const playerState = { mesh, material, tag, snapshots: [] };
+  const playerState = { mesh, tag, snapshots: [] };
   players.set(snapshotPlayer.id, playerState);
   return playerState;
 }
@@ -365,7 +384,6 @@ function cleanupDisconnectedPlayers(players: Map<string, PlayerMeshState>, liveI
   for (const [id, state] of players) {
     if (liveIds.has(id)) continue;
     state.mesh.dispose();
-    state.material.dispose();
     state.tag.mesh.dispose();
     state.tag.material.dispose();
     state.tag.texture.dispose();

@@ -106,6 +106,7 @@ struct Player {
     color: String,
     x: f32,
     z: f32,
+    facing_yaw: f32,
     move_x: f32,
     move_z: f32,
     last_seq: u32,
@@ -298,6 +299,7 @@ impl World {
             color: color.to_string(),
             x: spawn_x,
             z: spawn_z,
+            facing_yaw: 0.0,
             move_x: 0.0,
             move_z: 0.0,
             last_seq: 0,
@@ -386,6 +388,10 @@ impl World {
 
         player.move_x = clamped_x;
         player.move_z = clamped_z;
+        if (clamped_x * clamped_x) + (clamped_z * clamped_z) > 0.0 {
+            // Persist the latest non-zero heading so every client renders the same facing.
+            player.facing_yaw = facing_yaw_from_movement(clamped_x, clamped_z);
+        }
     }
 
     fn handle_kill(&mut self, id: Uuid, target_id: Uuid) {
@@ -822,6 +828,7 @@ impl World {
                         role: player.role,
                         x: player.x,
                         z: player.z,
+                        facing_yaw: player.facing_yaw,
                         state: player.state,
                         // Send cooldown in rendered server-time units so the client can gate kills accurately.
                         kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000 / self.tick_rate as u64,
@@ -1323,6 +1330,7 @@ mod tests {
                     color: "#fff".to_string(),
                     x: 0.0,
                     z: 0.0,
+                    facing_yaw: 0.0,
                     move_x: 0.0,
                     move_z: 0.0,
                     last_seq: 0,
@@ -1383,6 +1391,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 10.0,
                 z: -4.0,
+                facing_yaw: 0.0,
                 move_x: 1.0,
                 move_z: 1.0,
                 last_seq: 12,
@@ -1444,6 +1453,7 @@ mod tests {
                     color: "#fff".to_string(),
                     x: 0.0,
                     z: 0.0,
+                    facing_yaw: 0.0,
                     move_x: 0.0,
                     move_z: 0.0,
                     last_seq: 0,
@@ -1486,6 +1496,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 0.0,
                 z: 0.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1523,6 +1534,7 @@ mod tests {
                 color: "#ef4444".to_string(),
                 x: 0.0,
                 z: 0.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1540,6 +1552,7 @@ mod tests {
                 color: "#3b82f6".to_string(),
                 x: 1.0,
                 z: 1.0,
+                facing_yaw: 0.0,
                 move_x: 0.5,
                 move_z: 0.5,
                 last_seq: 0,
@@ -1557,6 +1570,7 @@ mod tests {
                 color: "#22c55e".to_string(),
                 x: 8.0,
                 z: 8.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1574,6 +1588,7 @@ mod tests {
                 color: "#eab308".to_string(),
                 x: -8.0,
                 z: 8.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1635,6 +1650,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: world.puzzle_stations[0].x,
                 z: world.puzzle_stations[0].z,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1687,6 +1703,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 0.0,
                 z: 0.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1704,6 +1721,7 @@ mod tests {
                 color: "#f00".to_string(),
                 x: 4.0,
                 z: 0.0,
+                facing_yaw: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1746,6 +1764,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 29.0,
                 z: 0.0,
+                facing_yaw: 0.0,
                 move_x: 1.0,
                 move_z: 1.0,
                 last_seq: 0,
@@ -1795,6 +1814,10 @@ fn clamp_position_to_phase_bounds(
 
     let scale = map_half_extent / distance_sq.sqrt();
     (x * scale, z * scale)
+}
+
+fn facing_yaw_from_movement(move_x: f32, move_z: f32) -> f32 {
+    move_x.atan2(move_z)
 }
 
 fn pick_player_color(index: usize) -> (&'static str, &'static str) {

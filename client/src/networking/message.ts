@@ -72,6 +72,7 @@ export type SnapshotPlayer = {
   role: PlayerRole;
   x: number;
   z: number;
+  facingYaw: number;
   state: PlayerState;
   killCooldownEndsAt: number;
   lastProcessedSeq: number;
