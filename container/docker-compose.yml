@@ -17,4 +17,4 @@ services:
     depends_on:
       - app
     # Use a temporary public URL for quick ECS/mobile testing.
-    command: tunnel --url http://app:80
+    command: tunnel --protocol http2 --url http://app:80
