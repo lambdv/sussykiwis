@@ -20,15 +20,14 @@ export class NetworkClient {
   private moveSpeed = DEFAULT_MOVE_SPEED;
 
   private getUrl(): string {
-    // Read HTTP server base URI from env and default locally if missing.
-    // Vite only exposes `VITE_*` variables to client bundles.
+    // Prefer an explicit server URI in dev, otherwise use the current site origin.
     const env = (import.meta as { env?: Record<string, string> }).env;
-    // Prefer the Vite-exposed name, but keep a fallback for older local `.env` files.
-    const serverUri =
-      env?.VITE_SERVER_URI ?? env?.SERVER_URI ?? "http://localhost:10000/";
+    const serverUri = env?.VITE_SERVER_URI ?? env?.SERVER_URI;
+    const base = serverUri
+      ? new URL(serverUri)
+      : new URL("/api/", window.location.origin);
 
     // Convert HTTP(S) URI to WS(S) endpoint and point to `/ws`.
-    const base = new URL(serverUri);
     const wsProtocol = base.protocol === "https:" ? "wss:" : "ws:";
 
     // If a base path is provided (eg. `/api/`), preserve it.

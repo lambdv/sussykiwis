@@ -2,3 +2,4 @@
 /temp
 /_client
 /target
+/container/.env

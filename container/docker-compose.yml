@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    container_name: kiwi-app
+    environment:
+      # Keep the Rust server private behind nginx inside the same container.
+      PORT: "3000"
+      HOST: "127.0.0.1"
+    ports:
+      - "8080:80"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: kiwi-cloudflared
+    depends_on:
+      - app
+    # Use a temporary public URL for quick ECS/mobile testing.
+    command: tunnel --url http://app:80
