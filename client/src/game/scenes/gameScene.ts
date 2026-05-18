@@ -136,7 +136,7 @@ function setupNetworkHandler(
       const state = upsertPlayerMesh(scene, players, snapshotPlayer);
 
       if (snapshotPlayer.id === localPlayerId) {
-        reconcileLocalPlayer(state, snapshotPlayer, gameState.pendingInputs);
+        reconcileLocalPlayer(state, snapshotPlayer, gameState.pendingInputs, network);
       } else {
         updateRemotePlayerSnapshots(state, snapshot);
       }
@@ -153,6 +153,7 @@ function reconcileLocalPlayer(
   state: PlayerState,
   snapshotPlayer: SnapshotPlayer,
   pendingInputs: GameState["pendingInputs"],
+  network: NetworkClient,
 ) {
   let targetX = snapshotPlayer.x;
   let targetZ = snapshotPlayer.z;
@@ -170,9 +171,19 @@ function reconcileLocalPlayer(
   const diffZ = targetZ - state.mesh.position.z;
   const distSq = diffX * diffX + diffZ * diffZ;
 
-  // If error is significant (> ~0.3 units), snap to correct drift.
+  // If error is large (> ~2 units), tell the server we're ahead instead of rubberbanding back
+  if (distSq > 4.0) {
+    const latestSeq = pendingInputs.length > 0 
+      ? pendingInputs[pendingInputs.length - 1].seq 
+      : snapshotPlayer.last_processed_seq;
+      
+    network.sendMessage({
+      SyncPosition: { seq: latestSeq, x: state.mesh.position.x, z: state.mesh.position.z }
+    });
+  } 
+  // If error is significant (> ~0.5 units) but not massive, snap to correct drift.
   // Otherwise, allow the slight discrepancy to stay to prevent micro-stutters.
-  if (distSq > 0.1) {
+  else if (distSq > 0.25) {
     state.mesh.position.x = targetX;
     state.mesh.position.z = targetZ;
   }

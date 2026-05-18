@@ -1,5 +1,5 @@
 // Client->server messages currently supported by the Rust lobby.
-export type ClientMessage = "Join" | { Input: InputMessage };
+export type ClientMessage = "Join" | { Input: InputMessage } | { SyncPosition: { seq: number; x: number; z: number } };
 
 export type InputMessage = {
   seq: number;

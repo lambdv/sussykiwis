@@ -219,6 +219,17 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
+                    ClientRequest::SyncPosition { seq, x, z } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::SyncPosition { id, seq, x, z })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING SYNC_POSITION");
+                            break;
+                        }
+                    }
                     ClientRequest::ClientLog(entry) => {
                         let details = entry.details.unwrap_or(serde_json::Value::Null);
                         info!(
@@ -274,7 +285,7 @@ async fn read_join_message(
                     "REMOTE CLIENT LOG (PRE-JOIN)"
                 );
             }
-            ClientRequest::Input(_) => return Err(()),
+            ClientRequest::Input(_) | ClientRequest::SyncPosition { .. } => return Err(()),
         }
     }
 }

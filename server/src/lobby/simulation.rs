@@ -159,6 +159,16 @@ impl World {
                     "SERVER INPUT UPDATE"
                 );
             }
+            GameCommand::SyncPosition { id, seq, x, z } => {
+                if let Some(player) = self.players.get_mut(&id) {
+                    if seq > player.last_seq {
+                        player.last_seq = seq;
+                    }
+                    player.x = x.clamp(-self.map_half_extent, self.map_half_extent);
+                    player.z = z.clamp(-self.map_half_extent, self.map_half_extent);
+                    debug!(player_id = %id, x, z, "SERVER POSITION SYNC");
+                }
+            }
         }
     }
 
@@ -208,6 +218,12 @@ pub enum GameCommand {
         seq: u32,
         move_x: f32,
         move_z: f32,
+    },
+    SyncPosition {
+        id: Uuid,
+        seq: u32,
+        x: f32,
+        z: f32,
     },
 }
 

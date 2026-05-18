@@ -17,6 +17,7 @@ pub mod model {
         /// Join request (e.g., join a lobby or server)
         Join,
         Input(InputMessage),
+        SyncPosition { seq: u32, x: f32, z: f32 },
         ClientLog(ClientLogEntry),
     }
 
