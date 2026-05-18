@@ -21,7 +21,7 @@ const REPORT_RANGE: f32 = 4.0;
 const PUZZLE_RANGE: f32 = 4.5;
 pub const TICK_RATE: u32 = 20;
 pub const MOVE_SPEED: f32 = 10.0;
-const LOBBY_COUNTDOWN_SECONDS: u64 = 30;
+const LOBBY_COUNTDOWN_SECONDS: u64 = 15;
 const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
 const TIMER_TARGET_SIZE: f32 = 0.8;
 const TIMER_ROTATION_PER_TICK: f32 = 0.28;
@@ -664,6 +664,11 @@ impl World {
     }
 
     fn handle_puzzle_tap(&mut self, id: Uuid) {
+        // Ignore puzzle input unless the round is actively playing.
+        if !matches!(self.phase, GamePhase::Playing) {
+            return;
+        }
+
         let Some(station_index) = self.active_station_for_player(id) else {
             return;
         };
@@ -704,6 +709,11 @@ impl World {
     }
 
     fn handle_puzzle_connect(&mut self, id: Uuid, from_index: usize, to_index: usize) {
+        // Ignore puzzle input unless the round is actively playing.
+        if !matches!(self.phase, GamePhase::Playing) {
+            return;
+        }
+
         let Some(station_index) = self.active_station_for_player(id) else {
             return;
         };

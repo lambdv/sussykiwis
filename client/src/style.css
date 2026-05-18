@@ -10,14 +10,179 @@ body {
 
 body {
   position: relative;
+  font-family: Arial, sans-serif;
 }
 
-#renderCanvas {
+#appRoot {
+  width: 100%;
+  height: 100%;
+}
+
+#appRoot canvas {
   width: 100%;
   height: 100%;
   display: block;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+.app-ui {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.route-modal {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.62);
+  pointer-events: auto;
+}
+
+.route-card {
+  width: min(92vw, 560px);
+  padding: 24px;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.96);
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4);
+}
+
+.route-title {
+  font-size: 40px;
+  font-weight: 800;
+}
+
+.route-body {
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.primary-button,
+.secondary-button,
+.action-button,
+.meeting-row button,
+.meeting-send {
+  pointer-events: auto;
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  font-weight: 700;
+  color: white;
+  background: #f35f7d;
+}
+
+.secondary-button {
+  background: #334155;
+}
+
+.status-panel,
+.spectator-panel {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  max-width: min(28rem, 88vw);
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: rgba(12, 18, 28, 0.86);
+  color: #f8fafc;
+  pointer-events: auto;
+}
+
+.spectator-panel {
+  top: 140px;
+}
+
+.action-panel {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: #64748b;
+}
+
+.ejection-banner {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: none;
+  padding: 16px 24px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.96);
+  color: #f8fafc;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.meeting-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: linear-gradient(180deg, rgba(16, 18, 30, 0.94), rgba(32, 20, 36, 0.96));
+  color: white;
+  padding: 16px;
+  display: none;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 12px;
+}
+
+.meeting-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.meeting-title {
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.meeting-notice {
+  min-height: 1.25rem;
+  opacity: 0.85;
+}
+
+.meeting-roster,
+.meeting-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meeting-row {
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meeting-input {
+  width: 100%;
+  min-height: 88px;
+  border-radius: 14px;
+  border: 0;
+  padding: 12px;
+  font: inherit;
 }
 
 #joystickZone {
@@ -39,6 +204,10 @@ body {
 }
 
 @media (max-width: 768px) {
+  .meeting-overlay {
+    grid-template-columns: 1fr;
+  }
+
   #joystickZone {
     left: 0.75rem;
     bottom: 0.75rem;
