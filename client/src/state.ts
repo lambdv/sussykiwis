@@ -1,4 +1,4 @@
-export type GameState = "MENU" | "QUEUE" | "GAME" | "GAME_END";
+export type GameState = "MENU" | "QUEUE" | "GAME" | "MEETING" | "EJECTED" | "NO_EJECT" | "WIN" | "GAME_END";
 
 type StateListener = (state: GameState) => void;
 

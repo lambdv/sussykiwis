@@ -1,22 +1,33 @@
-import type { ClientMessage, ServerMessage } from "./message";
+import type { ClientMessage, ServerMessage, WelcomeMessage } from "./message";
+import { Logger, LOG_SCOPES } from "../logger";
 
 type MessageHandler = (msg: ServerMessage) => void;
+
+type DisconnectHandler = () => void;
+
+const DEFAULT_MOVE_SPEED = 10.0;
 
 export class NetworkClient {
   private connection: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private messageHandlers = new Set<MessageHandler>();
+  private disconnectHandlers = new Set<DisconnectHandler>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private isDisconnecting = false;
+  private nextInputSeqValue = 0;
+  private moveSpeed = DEFAULT_MOVE_SPEED;
 
   private getUrl(): string {
-    // Read HTTP server base URI from env and default locally if missing.
-    // Vite only exposes `VITE_*` variables to client bundles.
+    // Prefer an explicit server URI in dev, otherwise use the current site origin.
     const env = (import.meta as { env?: Record<string, string> }).env;
-    // Prefer the Vite-exposed name, but keep a fallback for older local `.env` files.
-    const serverUri =
-      env?.VITE_SERVER_URI ?? env?.SERVER_URI ?? "http://localhost:10000/";
+    const serverUri = env?.VITE_SERVER_URI ?? env?.SERVER_URI;
+    const base = serverUri
+      ? new URL(serverUri)
+      : new URL("/api/", window.location.origin);
 
     // Convert HTTP(S) URI to WS(S) endpoint and point to `/ws`.
-    const base = new URL(serverUri);
     const wsProtocol = base.protocol === "https:" ? "wss:" : "ws:";
 
     // If a base path is provided (eg. `/api/`), preserve it.
@@ -25,7 +36,7 @@ export class NetworkClient {
     return `${wsProtocol}//${base.host}${basePath}/ws`;
   }
 
-  async connect(): Promise<void> {
+async connect(): Promise<void> {
     // Reuse an active socket immediately to avoid duplicate connections.
     if (this.isConnected()) return;
 
@@ -40,36 +51,86 @@ export class NetworkClient {
 
       this.connection.onopen = () => {
         this.connectPromise = null;
+        this.reconnectAttempts = 0;
+        Logger.info(LOG_SCOPES.NETWORK, "CLIENT: connected to server");
         res();
       };
 
       this.connection.onerror = () => {
         this.connectPromise = null;
+        this.handleDisconnect(false);
+        Logger.error(LOG_SCOPES.NETWORK, "CLIENT: websocket error");
         rej(new Error("Failed to connect socket"));
       };
 
-      this.connection.onmessage = (event) => {
+this.connection.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data as string) as ServerMessage;
+          if (msg.type === "welcome") {
+            // Keep session movement settings aligned with the authoritative server welcome.
+            this.nextInputSeqValue = 0;
+            this.moveSpeed = msg.moveSpeed;
+            Logger.info(LOG_SCOPES.NETWORK, "CLIENT: received welcome", {
+              playerId: msg.playerId,
+              name: msg.name,
+              role: msg.observer ? "observer" : "player",
+            });
+          }
           this.messageHandlers.forEach((handler) => handler(msg));
         } catch {
-          console.error("Failed to parse websocket message", event.data);
+          Logger.error(LOG_SCOPES.NETWORK, "CLIENT: failed to parse message", { raw: event.data });
         }
       };
 
       this.connection.onclose = () => {
         this.connection = null;
         this.connectPromise = null;
+        Logger.info(LOG_SCOPES.NETWORK, "CLIENT: disconnected");
+        this.handleDisconnect(this.isDisconnecting);
       };
     });
 
     return this.connectPromise;
   }
 
+  private handleDisconnect(wasIntentional: boolean) {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
+    this.disconnectHandlers.forEach((handler) => handler());
+
+    if (!wasIntentional && this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+      this.reconnectTimeout = setTimeout(() => {
+        this.reconnectTimeout = null;
+        this.connect();
+      }, delay);
+    }
+  }
+
+  async join(options: { name?: string; spectator?: boolean } = {}): Promise<WelcomeMessage> {
+    // Reuse the shared socket, then wait for the server welcome packet.
+    await this.connect();
+
+    return new Promise<WelcomeMessage>((resolve, reject) => {
+      const offMessage = this.onMessage((message) => {
+        if (message.type !== "welcome") return;
+        offMessage();
+        resolve(message);
+      });
+
+      if (!this.sendMessage({ type: "join", name: options.name, spectator: options.spectator })) {
+        offMessage();
+        reject(new Error("Failed to send join message"));
+      }
+    });
+  }
+
   sendMessage(message: ClientMessage): boolean {
-    // Prevent sending if socket is not yet connected.
     if (!this.isConnected()) {
-      console.error("WebSocket is not open; message dropped", message);
       return false;
     }
 
@@ -79,6 +140,16 @@ export class NetworkClient {
 
   isConnected(): boolean {
     return !!this.connection && this.connection.readyState === WebSocket.OPEN;
+  }
+
+  nextInputSeq(): number {
+    // Use one monotonic input stream for the whole websocket session across scene changes.
+    this.nextInputSeqValue += 1;
+    return this.nextInputSeqValue;
+  }
+
+  getMoveSpeed(): number {
+    return this.moveSpeed;
   }
 
   onMessage(handler: MessageHandler) {
@@ -96,8 +167,23 @@ export class NetworkClient {
 
   disconnect() {
     // Close the websocket cleanly when app exits or reconnect is needed.
+    this.isDisconnecting = true;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     this.connection?.close();
     this.connection = null;
     this.connectPromise = null;
+    this.reconnectAttempts = 0;
+    this.nextInputSeqValue = 0;
+    this.moveSpeed = DEFAULT_MOVE_SPEED;
+  }
+
+  onDisconnect(handler: DisconnectHandler) {
+    this.disconnectHandlers.add(handler);
+    return () => {
+      this.disconnectHandlers.delete(handler);
+    };
   }
 }

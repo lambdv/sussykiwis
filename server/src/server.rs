@@ -5,11 +5,8 @@ use axum::{
     Json,
     extract::State,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    http::{
-        StatusCode, Uri,
-        header::{self, HeaderMap, HeaderName},
-    },
-    response::{Html, IntoResponse},
+    http::StatusCode,
+    response::IntoResponse,
     routing::{any, get},
 };
 use futures_util::{SinkExt, stream::StreamExt};
@@ -22,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::lobby::simulation::start_simulation;
+use crate::lobby::simulation::{MOVE_SPEED, TICK_RATE};
 use crate::lobby::networking::model::{ClientRequest, ServerResponse};
 use crate::{GameCommand, ServerEvent};
 
@@ -102,7 +100,24 @@ pub fn get_app_router(state: ServerContext) -> axum::Router {
                 )
             }),
         )
+        .route(
+            "/ping",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "message": "pong"
+                    })),
+                )
+            }),
+        )
         .with_state(state)
+}
+
+pub fn get_app() -> axum::Router {
+    let (game_tx, _game_rx) = mpsc::channel::<GameCommand>(1);
+    let (event_tx, _event_rx) = broadcast::channel::<ServerEvent>(1);
+    get_app_router(ServerContext::new(game_tx, event_tx))
 }
 
 /// route handler for websocket connections
@@ -116,40 +131,72 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, context))
 }
 
-async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
+async fn handle_socket(socket: WebSocket, context: ServerContext) {
     info!("client connected");
 
     let (mut sender, mut receiver) = socket.split();
 
-    let joined = read_join_message(&mut receiver).await;
-
-    if joined.is_err() {
-        warn!("SERVER WS REJECTED: expected initial join message");
-        let _ = sender.close().await;
-        return;
-    }
+    let join_request = match read_join_message(&mut receiver).await {
+        Ok(request) => request,
+        Err(()) => {
+            warn!("SERVER WS REJECTED: expected initial join message");
+            let _ = sender.close().await;
+            return;
+        }
+    };
+    let requested_name = join_request.name;
+    let is_spectator = join_request.spectator;
 
     // Allocate identity and subscribe to server event fanout.
     let id = Uuid::new_v4();
     let short_id = id.to_string().chars().take(6).collect::<String>();
-    let name = format!("Player-{short_id}");
+    let fallback_name = if is_spectator {
+        format!("Observer-{short_id}")
+    } else {
+        format!("Player-{short_id}")
+    };
+    let name = requested_name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_name);
     let mut event_rx = context.event_tx.subscribe();
 
-    info!(client_id = %id, client_name = %name, "SERVER WS SESSION STARTED");
+    info!(client_id = %id, client_name = %name, spectator = is_spectator, "SERVER WS SESSION STARTED");
 
-    // Register this player in the authoritative game loop.
-    if context
-        .command_tx
-        .send(GameCommand::PlayerJoined {
-            id,
-            name: name.clone(),
-        })
+    // Register only player sessions in the authoritative game loop.
+    if !is_spectator {
+        if context
+            .command_tx
+            .send(GameCommand::PlayerJoined {
+                id,
+                name: name.clone(),
+            })
+            .await
+            .is_err()
+        {
+            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING JOIN");
+            let _ = sender.close().await;
+            return;
+        }
+    }
+
+    if is_spectator {
+        // Spectators skip the game loop registration and get a direct read-only welcome.
+        if send_message(
+            &mut sender,
+            &ServerResponse::Welcome {
+                player_id: id,
+                name: name.clone(),
+                tick_rate: TICK_RATE,
+                move_speed: MOVE_SPEED,
+                observer: true,
+            },
+        )
         .await
         .is_err()
-    {
-        warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING JOIN");
-        let _ = sender.close().await;
-        return;
+        {
+            let _ = sender.close().await;
+            return;
+        }
     }
 
     // Forward server events from the game loop to this websocket.
@@ -203,14 +250,18 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
                 };
 
                 match request {
-                    ClientRequest::Input(input) => {
+                    ClientRequest::Input {
+                        seq,
+                        move_x,
+                        move_y,
+                    } => {
                         if context
                             .command_tx
                             .send(GameCommand::PlayerInput {
                                 id,
-                                seq: input.seq,
-                                move_x: input.move_x,
-                                move_z: input.move_y,
+                                seq,
+                                move_x,
+                                move_z: move_y,
                             })
                             .await
                             .is_err()
@@ -219,29 +270,136 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
-                    ClientRequest::SyncPosition { seq, x, z } => {
+                    ClientRequest::Kill { target_id } => {
                         if context
                             .command_tx
-                            .send(GameCommand::SyncPosition { id, seq, x, z })
+                            .send(GameCommand::Kill { id, target_id })
                             .await
                             .is_err()
                         {
-                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING SYNC_POSITION");
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING KILL");
                             break;
                         }
                     }
-                    ClientRequest::ClientLog(entry) => {
-                        let details = entry.details.unwrap_or(serde_json::Value::Null);
+                    ClientRequest::ReportBody { body_id } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::ReportBody { id, body_id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING REPORT");
+                            break;
+                        }
+                    }
+                    ClientRequest::Vote { target } => {
+                        let raw_target = target.clone();
+                        let target = parse_vote_target(&raw_target);
+                        let Some(target) = target else {
+                            warn!(client_id = %id, raw_target = %raw_target, "SERVER INVALID VOTE TARGET");
+                            continue;
+                        };
+
+                        if context
+                            .command_tx
+                            .send(GameCommand::Vote { id, target })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING VOTE");
+                            break;
+                        }
+                    }
+                    ClientRequest::MeetingChat { message } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::MeetingChat { id, message })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING MEETING CHAT");
+                            break;
+                        }
+                    }
+                    ClientRequest::Sabotage { kind } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::Sabotage { id, kind })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING SABOTAGE");
+                            break;
+                        }
+                    }
+                    ClientRequest::StartPuzzle { station_id } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::StartPuzzle { id, station_id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE START");
+                            break;
+                        }
+                    }
+                    ClientRequest::CancelPuzzle => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::CancelPuzzle { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE CANCEL");
+                            break;
+                        }
+                    }
+                    ClientRequest::PuzzleTap => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::PuzzleTap { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE TAP");
+                            break;
+                        }
+                    }
+                    ClientRequest::PuzzleConnect {
+                        from_index,
+                        to_index,
+                    } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::PuzzleConnect {
+                                id,
+                                from_index,
+                                to_index,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE CONNECT");
+                            break;
+                        }
+                    }
+                    ClientRequest::ClientLog {
+                        scope,
+                        event,
+                        client_time,
+                        details,
+                    } => {
+                        let details = details.unwrap_or(serde_json::Value::Null);
                         info!(
                             client_id = %id,
-                            scope = %entry.scope,
-                            event = %entry.event,
-                            client_time = %entry.client_time,
+                            scope = %scope,
+                            event = %event,
+                            client_time = %client_time,
                             details = %details,
                             "REMOTE CLIENT LOG"
                         );
                     }
-                    ClientRequest::Join => {
+                    ClientRequest::Join { .. } => {
                         warn!(client_id = %id, "SERVER WS RECEIVED UNEXPECTED EXTRA JOIN");
                     }
                 }
@@ -252,15 +410,22 @@ async fn handle_socket(mut socket: WebSocket, context: ServerContext) {
     }
 
     // Notify game loop about disconnect and stop forwarding task.
-    let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
+    if !is_spectator {
+        let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
+    }
     info!(client_id = %id, "SERVER WS SESSION ENDED");
     writer_task.abort();
 }
 
 /// Reads and validates the first client packet as a join request.
+struct JoinRequest {
+    name: Option<String>,
+    spectator: bool,
+}
+
 async fn read_join_message(
     receiver: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Result<(), ()> {
+) -> Result<JoinRequest, ()> {
     loop {
         let Some(result) = receiver.next().await else {
             return Err(());
@@ -273,19 +438,33 @@ async fn read_join_message(
 
         let request = serde_json::from_str::<ClientRequest>(&text).map_err(|_| ())?;
         match request {
-            ClientRequest::Join => return Ok(()),
-            ClientRequest::ClientLog(entry) => {
+            ClientRequest::Join { name, spectator } => return Ok(JoinRequest { name, spectator }),
+            ClientRequest::ClientLog {
+                scope,
+                event,
+                client_time,
+                details,
+            } => {
                 // Accept pre-join debug traffic so visibility logs cannot break the handshake.
-                let details = entry.details.unwrap_or(serde_json::Value::Null);
+                let details = details.unwrap_or(serde_json::Value::Null);
                 info!(
-                    scope = %entry.scope,
-                    event = %entry.event,
-                    client_time = %entry.client_time,
+                    scope = %scope,
+                    event = %event,
+                    client_time = %client_time,
                     details = %details,
                     "REMOTE CLIENT LOG (PRE-JOIN)"
                 );
             }
-            ClientRequest::Input(_) | ClientRequest::SyncPosition { .. } => return Err(()),
+            ClientRequest::Input { .. }
+            | ClientRequest::Kill { .. }
+            | ClientRequest::ReportBody { .. }
+            | ClientRequest::Vote { .. }
+            | ClientRequest::MeetingChat { .. }
+            | ClientRequest::Sabotage { .. }
+            | ClientRequest::StartPuzzle { .. }
+            | ClientRequest::CancelPuzzle
+            | ClientRequest::PuzzleTap
+            | ClientRequest::PuzzleConnect { .. } => return Err(()),
         }
     }
 }
@@ -297,4 +476,14 @@ async fn send_message(
 ) -> Result<(), axum::Error> {
     let payload = serde_json::to_string(message).expect("server response must serialize");
     sender.send(Message::Text(payload.into())).await
+}
+
+fn parse_vote_target(raw: &str) -> Option<crate::lobby::simulation::VoteTarget> {
+    if raw == "skip" {
+        return Some(crate::lobby::simulation::VoteTarget::Skip);
+    }
+
+    Uuid::parse_str(raw)
+        .ok()
+        .map(crate::lobby::simulation::VoteTarget::Player)
 }

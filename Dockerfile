@@ -38,8 +38,8 @@ COPY --from=server-build /work/server/target/release/myserver /app/myserver
 COPY --from=client-build /work/client/dist /usr/share/nginx/html
 
 # Nginx config + entrypoint.
-COPY docker/nginx.conf /etc/nginx/nginx.conf
-COPY docker/entrypoint.sh /entrypoint.sh
+COPY container/nginx.conf /etc/nginx/nginx.conf
+COPY container/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Rust server listens on `PORT` internally; nginx listens on 80.

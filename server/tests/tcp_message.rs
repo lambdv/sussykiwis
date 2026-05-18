@@ -7,7 +7,8 @@ async fn tcp_ping_pong() {
 
     let server = TestServer::new(app);
 
-    let response = server.get("/ping").await;
-    response.assert_status_ok();
-    response.assert_text("pong");
+    server
+        .get("/ping")
+        .await
+        .assert_json(&serde_json::json!({ "message": "pong" }));
 }

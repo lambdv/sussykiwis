@@ -46,6 +46,7 @@ pub enum ServerEvent {
     WorldSnapshot(WorldSnapshot),
 }
 
+
 #[derive(Clone, Debug)]
 pub struct WorldSnapshot {
     pub server_time: u64,
