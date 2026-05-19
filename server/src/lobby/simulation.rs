@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::lobby::networking::model::{
-    ActiveSabotage, Faction, GamePhase, GameSubState, MeetingChatMessage, MeetingSnapshot,
+    ActiveSabotage, BorrowDirection, Faction, GamePhase, GameSubState, MeetingChatMessage, MeetingSnapshot,
     MeetingVoteCount, PlayerRole, PlayerState, PuzzleKind, PuzzleProjectionState,
     PuzzleStationSnapshot, SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody,
     SnapshotPlayer, WinMessage, WireColor, WireConnection, WorldSnapshot,
@@ -96,6 +96,17 @@ pub enum GameCommand {
         id: Uuid,
         from_index: usize,
         to_index: usize,
+    },
+    EnterBorrow {
+        id: Uuid,
+        borrow_id: Uuid,
+    },
+    TraverseBorrow {
+        id: Uuid,
+        direction: BorrowDirection,
+    },
+    ExitBorrow {
+        id: Uuid,
     },
 }
 
@@ -286,6 +297,16 @@ impl World {
                 from_index,
                 to_index,
             } => self.handle_puzzle_connect(id, from_index, to_index),
+            // Borrow movement is not wired into the simulation yet, so ignore these for now.
+            GameCommand::EnterBorrow { id, borrow_id } => {
+                let _ = (id, borrow_id);
+            }
+            GameCommand::TraverseBorrow { id, direction } => {
+                let _ = (id, direction);
+            }
+            GameCommand::ExitBorrow { id } => {
+                let _ = id;
+            }
         }
     }
 
@@ -843,8 +864,9 @@ impl World {
                         role: player.role,
                         x: player.x,
                         z: player.z,
-                        facing_yaw: player.facing_yaw,
+                        facing_left: player.facing_left,
                         state: player.state,
+                        current_borrow_id: None,
                         // Send cooldown in rendered server-time units so the client can gate kills accurately.
                         kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000 / self.tick_rate as u64,
                         last_processed_seq: player.last_seq,
@@ -852,6 +874,7 @@ impl World {
                         total_puzzle_count: TOTAL_PUZZLES_PER_PLAYER,
                     })
                     .collect::<Vec<_>>(),
+                kiwi_borrows: vec![],
                 dead_bodies: self
                     .dead_bodies
                     .values()
@@ -1345,7 +1368,7 @@ mod tests {
                     color: "#fff".to_string(),
                     x: 0.0,
                     z: 0.0,
-                    facing_yaw: 0.0,
+                    facing_left: false,
                     move_x: 0.0,
                     move_z: 0.0,
                     last_seq: 0,
@@ -1406,7 +1429,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 10.0,
                 z: -4.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 1.0,
                 move_z: 1.0,
                 last_seq: 12,
@@ -1468,7 +1491,7 @@ mod tests {
                     color: "#fff".to_string(),
                     x: 0.0,
                     z: 0.0,
-                    facing_yaw: 0.0,
+                    facing_left: false,
                     move_x: 0.0,
                     move_z: 0.0,
                     last_seq: 0,
@@ -1511,7 +1534,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 0.0,
                 z: 0.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1549,7 +1572,7 @@ mod tests {
                 color: "#ef4444".to_string(),
                 x: 0.0,
                 z: 0.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1567,7 +1590,7 @@ mod tests {
                 color: "#3b82f6".to_string(),
                 x: 1.0,
                 z: 1.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.5,
                 move_z: 0.5,
                 last_seq: 0,
@@ -1585,7 +1608,7 @@ mod tests {
                 color: "#22c55e".to_string(),
                 x: 8.0,
                 z: 8.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1603,7 +1626,7 @@ mod tests {
                 color: "#eab308".to_string(),
                 x: -8.0,
                 z: 8.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1665,7 +1688,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: world.puzzle_stations[0].x,
                 z: world.puzzle_stations[0].z,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1718,7 +1741,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 0.0,
                 z: 0.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1736,7 +1759,7 @@ mod tests {
                 color: "#f00".to_string(),
                 x: 4.0,
                 z: 0.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 0.0,
                 move_z: 0.0,
                 last_seq: 0,
@@ -1779,7 +1802,7 @@ mod tests {
                 color: "#fff".to_string(),
                 x: 29.0,
                 z: 0.0,
-                facing_yaw: 0.0,
+                facing_left: false,
                 move_x: 1.0,
                 move_z: 1.0,
                 last_seq: 0,

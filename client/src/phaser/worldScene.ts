@@ -44,6 +44,8 @@ type BorrowVisual = {
 };
 
 export class WorldScene extends Phaser.Scene {
+  // Keep the kiwi sprite compact so it reads as a character, not the whole tile.
+  private static readonly PLAYER_BASE_SCALE = 0.3;
   private session: ClientSession;
   private unsubscribe: (() => void) | null = null;
   private inputController: PlayerInputController | null = null;
@@ -391,9 +393,9 @@ private interpolateRemotePlayers() {
       }
 
       const hop = visual.isMoving ? Math.max(0, Math.sin(visual.movePhase)) : 0;
-      visual.sprite.setFlipX(visual.facingLeft);
+      visual.sprite.setFlipX(!visual.facingLeft);
       visual.sprite.setY(-hop * 6);
-      visual.sprite.setScale(0.9 - hop * 0.08, 0.9 + hop * 0.08);
+      visual.sprite.setScale(WorldScene.PLAYER_BASE_SCALE - hop * 0.03, WorldScene.PLAYER_BASE_SCALE + hop * 0.03);
     }
   }
 
@@ -438,7 +440,7 @@ private interpolateRemotePlayers() {
       return existing;
     }
 
-    const sprite = this.add.sprite(0, 0, this.getPlayerTexture(player.color)).setScale(0.9);
+    const sprite = this.add.sprite(0, 0, this.getPlayerTexture(player.color)).setScale(WorldScene.PLAYER_BASE_SCALE);
     const label = this.add.text(0, -28, player.name, {
       fontFamily: "Arial, sans-serif",
       fontSize: "14px",
