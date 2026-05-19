@@ -19,6 +19,20 @@ export type WireConnection = {
   toIndex: number;
 };
 
+export type BorrowDirection = "up" | "down" | "left" | "right";
+
+export type KiwiBorrowLink = {
+  direction: BorrowDirection;
+  borrowId: string;
+};
+
+export type KiwiBorrowSnapshot = {
+  id: string;
+  x: number;
+  z: number;
+  links: KiwiBorrowLink[];
+};
+
 export type PuzzleProjectionState =
   | { kind: "timer"; dialAngle: number; targetStart: number; targetSize: number }
   | { kind: "wires"; leftColors: WireColor[]; rightColors: WireColor[]; connectedPairs: WireConnection[] };
@@ -45,6 +59,9 @@ export type ClientMessage =
   | { type: "cancel_puzzle" }
   | { type: "puzzle_tap" }
   | { type: "puzzle_connect"; fromIndex: number; toIndex: number }
+  | { type: "enter_borrow"; borrowId: string }
+  | { type: "traverse_borrow"; direction: BorrowDirection }
+  | { type: "exit_borrow" }
   | {
       type: "client_log";
       scope: string;
@@ -72,8 +89,10 @@ export type SnapshotPlayer = {
   role: PlayerRole;
   x: number;
   z: number;
-  facingYaw: number;
+  // Authoritative flag indicating if the player is looking to the left
+  facingLeft: boolean;
   state: PlayerState;
+  currentBorrowId: string | null;
   killCooldownEndsAt: number;
   lastProcessedSeq: number;
   completedPuzzleCount: number;
@@ -121,6 +140,7 @@ export type WorldSnapshot = {
   players: SnapshotPlayer[];
   deadBodies: SnapshotDeadBody[];
   puzzleStations: PuzzleStationSnapshot[];
+  kiwiBorrows: KiwiBorrowSnapshot[];
   activeSabotages: ActiveSabotage[];
   meeting: MeetingSnapshot | null;
   win: WinState | null;

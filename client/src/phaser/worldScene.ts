@@ -4,7 +4,6 @@ import {
   canLocallyMove,
   getFacingFromMovement,
   getMapHalfExtent,
-  getRemoteRenderPosition,
   predictLocalPlayer,
   reconcileLocalPlayer,
   updateRenderTime,
@@ -16,10 +15,15 @@ import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from
 
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
-  circle: Phaser.GameObjects.Arc;
-  facing: Phaser.GameObjects.Line;
+  sprite: Phaser.GameObjects.Sprite;
   label: Phaser.GameObjects.Text;
   snapshots: RemoteSnapshot[];
+  facingLeft: boolean;
+  lastInputFacingLeft: boolean | null;
+  movePhase: number;
+  isMoving: boolean;
+  lastRenderX: number;
+  lastRenderY: number;
 };
 
 type BodyVisual = {
@@ -33,6 +37,12 @@ type PuzzleVisual = {
   miniPuzzle: Phaser.GameObjects.Graphics;
 };
 
+type BorrowVisual = {
+  container: Phaser.GameObjects.Container;
+  ring: Phaser.GameObjects.Arc;
+  label: Phaser.GameObjects.Text;
+};
+
 export class WorldScene extends Phaser.Scene {
   private session: ClientSession;
   private unsubscribe: (() => void) | null = null;
@@ -41,9 +51,12 @@ export class WorldScene extends Phaser.Scene {
   private latestServerTime = 0;
   private renderTime = 0;
   private pendingInputs: PendingInput[] = [];
+  private lastBorrowDirection: "up" | "down" | "left" | "right" | null = null;
+  private playerTextureCache = new Map<string, string>();
   private players = new Map<string, PlayerVisual>();
   private bodies = new Map<string, BodyVisual>();
   private puzzles = new Map<string, PuzzleVisual>();
+  private borrows = new Map<string, BorrowVisual>();
   private arena!: Phaser.GameObjects.Graphics;
 
   constructor(session: ClientSession) {
@@ -71,7 +84,13 @@ export class WorldScene extends Phaser.Scene {
       this.players.clear();
       this.bodies.clear();
       this.puzzles.clear();
+      this.borrows.clear();
     });
+  }
+
+  preload() {
+    // Load the shared kiwi source sprite once, then recolor it per player in memory.
+    this.load.image("kiwi-source", "/assets/2d/kwi.png");
   }
 
   update(_time: number, delta: number) {
@@ -85,6 +104,7 @@ export class WorldScene extends Phaser.Scene {
     this.renderTime = updateRenderTime(this.renderTime, this.latestServerTime, delta);
     this.updateMovement(snapshot, delta / 1000);
     this.interpolateRemotePlayers();
+    this.updatePlayerMotion(delta / 1000);
     this.updateCamera(snapshot);
   }
 
@@ -98,29 +118,40 @@ export class WorldScene extends Phaser.Scene {
     this.syncPlayers(snapshot);
     this.syncBodies(snapshot.deadBodies);
     this.syncPuzzles(snapshot);
+    this.syncBorrows(snapshot);
   }
 
   private drawArena(snapshot: WorldSnapshot) {
+    // Determine the map boundaries. We add a visual padding of 4 units (64 pixels)
+    // so that when the player reaches the map's boundary, the rendered borders are
+    // further away from their position, avoiding a cramped feeling at the edges.
     const mapHalfExtent = snapshot.mapHalfExtent;
+    const visualPadding = 4;
+    const drawExtent = mapHalfExtent + visualPadding;
+    
+    // Choose floor/border colors depending on active sabotages and game phase.
     const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
     const baseColor = lightsOff ? 0x05070b : snapshot.phase === "lobby" ? 0x102e1c : 0x10263a;
     const borderColor = lightsOff ? 0xf8fafc : snapshot.phase === "lobby" ? 0xf6bd60 : 0x7dd3fc;
 
+    // Draw the arena background and outer border boundaries with the visual padding.
     this.arena.clear();
     this.arena.fillStyle(baseColor, 1);
     if (snapshot.phase === "lobby") {
-      this.arena.fillCircle(0, 0, mapHalfExtent * 16);
+      this.arena.fillCircle(0, 0, drawExtent * 16);
     } else {
-      this.arena.fillRect(-mapHalfExtent * 16, -mapHalfExtent * 16, mapHalfExtent * 32, mapHalfExtent * 32);
+      this.arena.fillRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
     }
     this.arena.lineStyle(6, borderColor, 1);
     if (snapshot.phase === "lobby") {
-      this.arena.strokeCircle(0, 0, mapHalfExtent * 16);
+      this.arena.strokeCircle(0, 0, drawExtent * 16);
     } else {
-      this.arena.strokeRect(-mapHalfExtent * 16, -mapHalfExtent * 16, mapHalfExtent * 32, mapHalfExtent * 32);
+      this.arena.strokeRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
     }
 
-    this.cameras.main.setBounds(-mapHalfExtent * 16, -mapHalfExtent * 16, mapHalfExtent * 32, mapHalfExtent * 32);
+    // We do NOT set the camera bounds here. This simplifies camera following and 
+    // prevents the camera from getting stuck or colliding at the top-left boundary, 
+    // which previously caused the player to become off-centered.
   }
 
   private syncPlayers(snapshot: WorldSnapshot) {
@@ -131,13 +162,13 @@ export class WorldScene extends Phaser.Scene {
     for (const player of snapshot.players) {
       liveIds.add(player.id);
       const visual = this.upsertPlayer(player);
-      visual.circle.setFillStyle(grayPlayers ? 0x8e909a : Phaser.Display.Color.HexStringToColor(player.color).color);
+      visual.sprite.setTint(grayPlayers ? 0x8e909a : Phaser.Display.Color.HexStringToColor(player.color).color);
       visual.label.setColor(this.state.localRole === "imposter" && player.role === "imposter" ? "#ff5d73" : "#f8fafc");
 
       const isGhost = player.state === "ghost";
       const isVisible = this.state.viewMode === "spectator" || player.id === localPlayerId || !isGhost;
       visual.container.setVisible(isVisible);
-      visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
+visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
       if (player.id === localPlayerId) {
         const reconciled = reconcileLocalPlayer(
@@ -148,13 +179,17 @@ export class WorldScene extends Phaser.Scene {
           snapshot.phase,
         );
         visual.container.setPosition(reconciled.x * 16, reconciled.y * 16);
-        visual.container.rotation = reconciled.facing;
+        if (visual.lastInputFacingLeft !== null) {
+          visual.facingLeft = visual.lastInputFacingLeft;
+        } else {
+          visual.facingLeft = reconciled.facingLeft;
+        }
       } else {
         visual.snapshots.push({
           time: snapshot.serverTime,
           x: player.x * 16,
           y: player.z * 16,
-          facing: player.facingYaw,
+          facingLeft: player.facingLeft,
         });
         if (visual.snapshots.length > 10) {
           visual.snapshots.shift();
@@ -191,6 +226,10 @@ export class WorldScene extends Phaser.Scene {
       for (const [id, visual] of this.puzzles) {
         visual.container.destroy();
         this.puzzles.delete(id);
+      }
+      for (const [id, visual] of this.borrows) {
+        visual.container.destroy();
+        this.borrows.delete(id);
       }
       return;
     }
@@ -244,6 +283,30 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  private syncBorrows(snapshot: WorldSnapshot) {
+    if (snapshot.phase === "lobby") {
+      for (const [id, visual] of this.borrows) {
+        visual.container.destroy();
+        this.borrows.delete(id);
+      }
+      return;
+    }
+
+    const liveIds = new Set<string>();
+
+    for (const borrow of snapshot.kiwiBorrows) {
+      liveIds.add(borrow.id);
+      const visual = this.borrows.get(borrow.id) ?? this.createBorrow(borrow.id);
+      visual.container.setPosition(borrow.x * 16, borrow.z * 16);
+    }
+
+    for (const [id, visual] of this.borrows) {
+      if (liveIds.has(id)) continue;
+      visual.container.destroy();
+      this.borrows.delete(id);
+    }
+  }
+
   private updateMovement(snapshot: WorldSnapshot, dt: number) {
     const localPlayerId = this.state.localPlayerId;
     if (!localPlayerId || this.state.viewMode === "spectator") {
@@ -259,8 +322,28 @@ export class WorldScene extends Phaser.Scene {
     const input = this.inputController?.getInput() ?? { x: 0, y: 0 };
     const seq = this.session.nextInputSeq();
     const facing = getFacingFromMovement(input.x, input.y);
+    const moving = input.x !== 0 || input.y !== 0;
+    const activeBorrow = snapshot.kiwiBorrows.find((borrow) => borrow.id === localPlayer.currentBorrowId) ?? null;
 
     if (canLocallyMove(snapshot.phase, localPlayer.state)) {
+      if (activeBorrow) {
+        const borrowDirection = this.getBorrowDirection(input.x, input.y);
+        if (borrowDirection && borrowDirection !== this.lastBorrowDirection) {
+          this.lastBorrowDirection = borrowDirection;
+          this.session.traverseBorrow(borrowDirection);
+        } else if (!borrowDirection) {
+          this.lastBorrowDirection = null;
+        }
+
+        visual.isMoving = false;
+        this.pendingInputs.push({ seq, moveX: 0, moveY: 0, dt, facingLeft: facing });
+        if (this.pendingInputs.length > 120) {
+          this.pendingInputs.shift();
+        }
+        this.session.sendInput(seq, 0, 0);
+        return;
+      }
+
       const predicted = predictLocalPlayer(
         visual.container.x / 16,
         visual.container.y / 16,
@@ -272,43 +355,78 @@ export class WorldScene extends Phaser.Scene {
         snapshot.phase,
       );
 
-      visual.container.setPosition(predicted.x * 16, predicted.y * 16);
+visual.container.setPosition(predicted.x * 16, predicted.y * 16);
       if (facing !== null) {
-        visual.container.rotation = facing;
+        visual.facingLeft = facing;
+        visual.lastInputFacingLeft = facing;
       }
-      this.pendingInputs.push({ seq, moveX: input.x, moveY: input.y, dt, facing });
+      visual.isMoving = moving;
+      this.pendingInputs.push({ seq, moveX: input.x, moveY: input.y, dt, facingLeft: facing });
       if (this.pendingInputs.length > 120) {
         this.pendingInputs.shift();
       }
+      this.lastBorrowDirection = null;
     }
 
     this.session.sendInput(seq, input.x, input.y);
   }
 
-  private interpolateRemotePlayers() {
+private interpolateRemotePlayers() {
     for (const [id, visual] of this.players) {
       if (id === this.state.localPlayerId) continue;
-      const renderPosition = getRemoteRenderPosition(visual.snapshots, this.renderTime);
-      if (!renderPosition) continue;
-      visual.container.setPosition(renderPosition.x, renderPosition.y);
-      visual.container.rotation = renderPosition.facing;
+      if (visual.snapshots.length === 0) continue;
+      const latest = visual.snapshots[visual.snapshots.length - 1];
+      visual.container.setPosition(latest.x, latest.y);
+      visual.facingLeft = latest.facingLeft;
+      visual.isMoving = Math.abs(latest.x - visual.lastRenderX) + Math.abs(latest.y - visual.lastRenderY) > 0.1;
+      visual.lastRenderX = latest.x;
+      visual.lastRenderY = latest.y;
+    }
+  }
+
+  private updatePlayerMotion(dt: number) {
+    for (const visual of this.players.values()) {
+      if (visual.isMoving) {
+        visual.movePhase = (visual.movePhase + dt * 14) % (Math.PI * 2);
+      }
+
+      const hop = visual.isMoving ? Math.max(0, Math.sin(visual.movePhase)) : 0;
+      visual.sprite.setFlipX(visual.facingLeft);
+      visual.sprite.setY(-hop * 6);
+      visual.sprite.setScale(0.9 - hop * 0.08, 0.9 + hop * 0.08);
     }
   }
 
   private updateCamera(snapshot: WorldSnapshot) {
     const mapHalfExtent = snapshot.mapHalfExtent;
+    const visualPadding = 4;
+    const drawExtent = mapHalfExtent + visualPadding;
 
     if (this.state.viewMode === "spectator") {
+      // Spectator camera is centered on the map and zoomed to fit the padded arena perfectly.
       this.cameras.main.stopFollow();
       this.cameras.main.centerOn(0, 0);
-      this.cameras.main.setZoom(Math.max(0.45, Math.min(1.1, 720 / (mapHalfExtent * 32))));
+      this.cameras.main.setZoom(Math.max(0.45, Math.min(1.1, 720 / (drawExtent * 32))));
       return;
     }
 
     const localPlayer = this.state.localPlayerId ? this.players.get(this.state.localPlayerId) : null;
     if (localPlayer) {
-      this.cameras.main.startFollow(localPlayer.container, true, 0.14, 0.14);
-      this.cameras.main.setZoom(1.35);
+      // Start following the local player container with a lerp value of 1 to keep
+      // the camera always centered on the player position without lag or deadzone.
+      this.cameras.main.startFollow(localPlayer.container, true, 1, 1);
+      
+      // Calculate normalized zoom based on reference screen proportions.
+      // This guarantees that players with larger displays or zoomed-out browsers
+      // see exactly the same amount of the game board as smaller screens, rather than
+      // gaining an unfair advantage by rendering a wider perspective.
+      const targetWidth = 711;
+      const targetHeight = 400;
+      const zoomX = this.cameras.main.width / targetWidth;
+      const zoomY = this.cameras.main.height / targetHeight;
+      const zoom = Math.max(zoomX, zoomY);
+
+      this.cameras.main.setZoom(zoom);
     }
   }
 
@@ -316,11 +434,11 @@ export class WorldScene extends Phaser.Scene {
     const existing = this.players.get(player.id);
     if (existing) {
       existing.label.setText(player.name);
+      existing.sprite.setTexture(this.getPlayerTexture(player.color));
       return existing;
     }
 
-    const circle = this.add.circle(0, 0, 14, Phaser.Display.Color.HexStringToColor(player.color).color, 1);
-    const facing = this.add.line(0, 0, 0, 0, 18, 0, 0xffffff, 1).setLineWidth(3, 3);
+    const sprite = this.add.sprite(0, 0, this.getPlayerTexture(player.color)).setScale(0.9);
     const label = this.add.text(0, -28, player.name, {
       fontFamily: "Arial, sans-serif",
       fontSize: "14px",
@@ -329,10 +447,21 @@ export class WorldScene extends Phaser.Scene {
       strokeThickness: 4,
       align: "center",
     }).setOrigin(0.5);
-    const container = this.add.container(player.x * 16, player.z * 16, [circle, facing, label]);
+    const container = this.add.container(player.x * 16, player.z * 16, [sprite, label]);
     container.setDepth(10);
 
-    const visual = { container, circle, facing, label, snapshots: [] };
+const visual = {
+      container,
+      sprite,
+      label,
+      snapshots: [],
+      facingLeft: player.facingLeft,
+      lastInputFacingLeft: null,
+      movePhase: 0,
+      isMoving: false,
+      lastRenderX: player.x * 16,
+      lastRenderY: player.z * 16,
+    };
     this.players.set(player.id, visual);
     return visual;
   }
@@ -359,4 +488,93 @@ export class WorldScene extends Phaser.Scene {
     this.puzzles.set(id, visual);
     return visual;
   }
+
+  private createBorrow(id: string) {
+    const ring = this.add.circle(0, 0, 13, 0x7c3aed, 0.95).setStrokeStyle(4, 0xf5d0fe, 1);
+    const label = this.add.text(0, 0, "KB", {
+      fontFamily: "Arial, sans-serif",
+      fontSize: "12px",
+      color: "#f8fafc",
+    }).setOrigin(0.5);
+    const container = this.add.container(0, 0, [ring, label]).setDepth(7);
+    const visual = { container, ring, label };
+    this.borrows.set(id, visual);
+    return visual;
+  }
+
+  private getBorrowDirection(x: number, y: number) {
+    if (Math.abs(x) < 0.2 && Math.abs(y) < 0.2) {
+      return null;
+    }
+
+    if (Math.abs(x) >= Math.abs(y)) {
+      return x < 0 ? "left" : "right";
+    }
+
+    return y < 0 ? "up" : "down";
+  }
+
+  private getPlayerTexture(color: string) {
+    const cached = this.playerTextureCache.get(color);
+    if (cached) {
+      return cached;
+    }
+
+    const source = this.textures.get("kiwi-source").getSourceImage() as HTMLImageElement | HTMLCanvasElement | null;
+    if (!source) {
+      return "kiwi-source";
+    }
+
+    const key = `kiwi-${color.replace(/[^a-f0-9]/gi, "") || "default"}`;
+    if (this.textures.exists(key)) {
+      this.playerTextureCache.set(color, key);
+      return key;
+    }
+
+    const canvasTexture = this.textures.createCanvas(key, source.width, source.height);
+    if (!canvasTexture) {
+      return "kiwi-source";
+    }
+    const context = canvasTexture.getContext();
+    context.clearRect(0, 0, source.width, source.height);
+    context.drawImage(source, 0, 0);
+
+    const image = context.getImageData(0, 0, source.width, source.height);
+    const { r, g, b } = parseHexColor(color);
+
+    for (let index = 0; index < image.data.length; index += 4) {
+      const alpha = image.data[index + 3];
+      if (alpha === 0) continue;
+
+      const red = image.data[index];
+      const green = image.data[index + 1];
+      const blue = image.data[index + 2];
+
+      // Only retint the red body pixels so the black outline and white background stay intact.
+      if (red < 120 || red < green * 1.2 || red < blue * 1.2) {
+        continue;
+      }
+
+      const base = red * 0.299 + green * 0.587 + blue * 0.114;
+      const intensity = Math.max(0.35, Math.min(1, base / 255));
+      image.data[index] = Math.round(r * intensity);
+      image.data[index + 1] = Math.round(g * intensity);
+      image.data[index + 2] = Math.round(b * intensity);
+    }
+
+    context.putImageData(image, 0, 0);
+    canvasTexture.refresh();
+    this.playerTextureCache.set(color, key);
+    return key;
+  }
+}
+
+function parseHexColor(color: string) {
+  const hex = color.replace("#", "");
+  const normalized = hex.length === 3 ? hex.split("").map((ch) => ch + ch).join("") : hex.padEnd(6, "0").slice(0, 6);
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16) || 255,
+    g: Number.parseInt(normalized.slice(2, 4), 16) || 255,
+    b: Number.parseInt(normalized.slice(4, 6), 16) || 255,
+  };
 }

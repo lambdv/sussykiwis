@@ -106,7 +106,8 @@ struct Player {
     color: String,
     x: f32,
     z: f32,
-    facing_yaw: f32,
+    // Authoritative flag indicating if the player is looking to the left
+    facing_left: bool,
     move_x: f32,
     move_z: f32,
     last_seq: u32,
@@ -299,7 +300,8 @@ impl World {
             color: color.to_string(),
             x: spawn_x,
             z: spawn_z,
-            facing_yaw: 0.0,
+            // By default, the player is not looking left
+            facing_left: false,
             move_x: 0.0,
             move_z: 0.0,
             last_seq: 0,
@@ -388,9 +390,12 @@ impl World {
 
         player.move_x = clamped_x;
         player.move_z = clamped_z;
-        if (clamped_x * clamped_x) + (clamped_z * clamped_z) > 0.0 {
-            // Persist the latest non-zero heading so every client renders the same facing.
-            player.facing_yaw = facing_yaw_from_movement(clamped_x, clamped_z);
+        if clamped_x < 0.0 {
+            // Player is moving left, update the facing direction immediately
+            player.facing_left = true;
+        } else if clamped_x > 0.0 {
+            // Player is moving right, update the facing direction immediately
+            player.facing_left = false;
         }
     }
 

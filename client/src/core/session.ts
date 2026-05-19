@@ -195,6 +195,18 @@ export class ClientSession {
     this.network.sendMessage({ type: "puzzle_connect", fromIndex, toIndex });
   }
 
+  enterBorrow(borrowId: string) {
+    this.network.sendMessage({ type: "enter_borrow", borrowId });
+  }
+
+  traverseBorrow(direction: "up" | "down" | "left" | "right") {
+    this.network.sendMessage({ type: "traverse_borrow", direction });
+  }
+
+  exitBorrow() {
+    this.network.sendMessage({ type: "exit_borrow" });
+  }
+
   vote(target: string | "skip") {
     this.network.sendMessage({ type: "vote", target });
   }

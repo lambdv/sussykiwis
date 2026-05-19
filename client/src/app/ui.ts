@@ -39,7 +39,25 @@ export function createAppUi(session: ClientSession) {
   const lightsButton = createActionButton("Lights");
   const grayButton = createActionButton("Gray");
   const puzzleButton = createActionButton("Puzzle");
-  actions.append(reportButton, killButton, lightsButton, grayButton, puzzleButton);
+  const borrowButton = createActionButton("Kiwi Borrow");
+  const borrowExitButton = createActionButton("Exit Borrow");
+  const borrowUpButton = createActionButton("Borrow Up");
+  const borrowDownButton = createActionButton("Borrow Down");
+  const borrowLeftButton = createActionButton("Borrow Left");
+  const borrowRightButton = createActionButton("Borrow Right");
+  actions.append(
+    reportButton,
+    killButton,
+    lightsButton,
+    grayButton,
+    puzzleButton,
+    borrowButton,
+    borrowExitButton,
+    borrowUpButton,
+    borrowDownButton,
+    borrowLeftButton,
+    borrowRightButton,
+  );
 
   const puzzleModal = createPuzzleModal({
     onCancel: () => session.cancelPuzzle(),
@@ -168,6 +186,32 @@ export function createAppUi(session: ClientSession) {
         }
       },
     );
+    setButtonState(
+      borrowButton,
+      Boolean(hud.canUseBorrow && hud.nearbyBorrow && !hud.activeBorrow),
+      hud.activeBorrow ? "Borrow Active" : hud.nearbyBorrow ? "Enter Kiwi Borrow" : "Kiwi Borrow",
+      () => {
+        if (hud.nearbyBorrow) {
+          session.enterBorrow(hud.nearbyBorrow.id);
+        }
+      },
+    );
+    setButtonState(borrowExitButton, Boolean(hud.activeBorrow), "Exit Borrow", () => session.exitBorrow());
+    setButtonState(borrowUpButton, Boolean(hud.activeBorrow), "^", () => session.traverseBorrow("up"));
+    setButtonState(borrowDownButton, Boolean(hud.activeBorrow), "v", () => session.traverseBorrow("down"));
+    setButtonState(borrowLeftButton, Boolean(hud.activeBorrow), "<", () => session.traverseBorrow("left"));
+    setButtonState(borrowRightButton, Boolean(hud.activeBorrow), ">", () => session.traverseBorrow("right"));
+
+    [
+      borrowButton,
+      borrowExitButton,
+      borrowUpButton,
+      borrowDownButton,
+      borrowLeftButton,
+      borrowRightButton,
+    ].forEach((button) => {
+      button.style.display = state.viewMode === "player" && state.route === "world" && !isLobby ? "inline-flex" : "none";
+    });
 
     const activePuzzle = state.snapshot?.puzzleStations.find((station) => station.occupiedBy === state.localPlayerId) ?? null;
     puzzleModal.update({ station: activePuzzle, player: localPlayer });

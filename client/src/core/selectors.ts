@@ -9,6 +9,7 @@ import type {
 const BODY_INTERACTION_RANGE_SQ = 16;
 const KILL_INTERACTION_RANGE_SQ = 36;
 const PUZZLE_INTERACTION_RANGE_SQ = 20.25;
+const BORROW_INTERACTION_RANGE_SQ = 20.25;
 
 export function getLocalPlayer(snapshot: WorldSnapshot | null, localPlayerId: string | null) {
   return snapshot?.players.find((player) => player.id === localPlayerId) ?? null;
@@ -65,6 +66,21 @@ export function findNearbyPuzzle(x: number, y: number, localPlayerId: string, st
   return best;
 }
 
+export function findNearbyBorrow(x: number, y: number, borrows: WorldSnapshot["kiwiBorrows"]) {
+  let best: WorldSnapshot["kiwiBorrows"][number] | null = null;
+  let bestDistSq = BORROW_INTERACTION_RANGE_SQ;
+
+  for (const borrow of borrows) {
+    const distSq = distanceSq(x, y, borrow.x, borrow.z);
+    if (distSq < bestDistSq) {
+      best = borrow;
+      bestDistSq = distSq;
+    }
+  }
+
+  return best;
+}
+
 export function canPlayerWorkPuzzle(snapshot: WorldSnapshot | null, player: SnapshotPlayer | null) {
   return snapshot?.phase === "playing"
     && !!player
@@ -85,9 +101,14 @@ export function deriveHudState(snapshot: WorldSnapshot | null, localPlayerId: st
   const nearbyPuzzle = snapshot && localPlayer && localX !== undefined && localY !== undefined
     ? findNearbyPuzzle(localX, localY, localPlayer.id, snapshot.puzzleStations)
     : null;
+  const nearbyBorrow = snapshot && localPlayer && localX !== undefined && localY !== undefined
+    ? findNearbyBorrow(localX, localY, snapshot.kiwiBorrows)
+    : null;
+  const activeBorrow = snapshot?.kiwiBorrows.find((borrow) => borrow.id === localPlayer?.currentBorrowId) ?? null;
   const activePuzzle = snapshot?.puzzleStations.find((station) => station.occupiedBy === localPlayerId) ?? null;
   const isAlive = snapshot?.phase === "playing" && localPlayer?.state === "alive";
   const canWorkPuzzle = canPlayerWorkPuzzle(snapshot, localPlayer);
+  const canUseBorrow = Boolean(isAlive && localRole === "imposter");
   const killCooldownRemainingMs = Math.max(0, (localPlayer?.killCooldownEndsAt ?? 0) - (snapshot?.serverTime ?? 0));
 
   return {
@@ -95,6 +116,8 @@ export function deriveHudState(snapshot: WorldSnapshot | null, localPlayerId: st
     nearbyBody,
     nearbyTarget,
     nearbyPuzzle,
+    nearbyBorrow,
+    activeBorrow,
     activePuzzle,
     canReport: Boolean(isAlive && nearbyBody),
     canKill: Boolean(
@@ -105,6 +128,7 @@ export function deriveHudState(snapshot: WorldSnapshot | null, localPlayerId: st
     ),
     canSabotage: Boolean(isAlive && localRole === "imposter"),
     canWorkPuzzle,
+    canUseBorrow,
     killCooldownRemainingSeconds: Math.ceil(killCooldownRemainingMs / 1000),
   };
 }

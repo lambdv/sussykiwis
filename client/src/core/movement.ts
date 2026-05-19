@@ -5,14 +5,14 @@ export type PendingInput = {
   moveX: number;
   moveY: number;
   dt: number;
-  facing: number | null;
+  facingLeft: boolean | null;
 };
 
 export type RemoteSnapshot = {
   time: number;
   x: number;
   y: number;
-  facing: number;
+  facingLeft: boolean;
 };
 
 export function updateRenderTime(currentRenderTime: number, latestServerTime: number, dtMs: number) {
@@ -32,12 +32,12 @@ export function updateRenderTime(currentRenderTime: number, latestServerTime: nu
   return nextRenderTime + diff * 0.1;
 }
 
-export function getFacingFromMovement(x: number, y: number) {
-  if ((x * x) + (y * y) === 0) {
+export function getFacingFromMovement(x: number, _y: number) {
+  if (x === 0) {
     return null;
   }
 
-  return Math.atan2(y, x);
+  return x < 0;
 }
 
 export function clampToPhaseBounds(x: number, y: number, mapHalfExtent: number, phase: GamePhase) {
@@ -74,7 +74,8 @@ export function reconcileLocalPlayer(
 ) {
   let targetX = snapshotPlayer.x;
   let targetY = snapshotPlayer.z;
-  let targetFacing = snapshotPlayer.facingYaw;
+  // Initialize target facing directly from the authoritative snapshot player state
+  let targetFacingLeft = snapshotPlayer.facingLeft;
 
   while (pendingInputs.length > 0 && pendingInputs[0].seq <= snapshotPlayer.lastProcessedSeq) {
     pendingInputs.shift();
@@ -83,8 +84,8 @@ export function reconcileLocalPlayer(
   for (const input of pendingInputs) {
     targetX += input.moveX * moveSpeed * input.dt;
     targetY += input.moveY * moveSpeed * input.dt;
-    if (input.facing !== null) {
-      targetFacing = input.facing;
+    if (input.facingLeft !== null) {
+      targetFacingLeft = input.facingLeft;
     }
   }
 
@@ -92,7 +93,7 @@ export function reconcileLocalPlayer(
   return {
     x: clamped.x,
     y: clamped.y,
-    facing: targetFacing,
+    facingLeft: targetFacingLeft,
   };
 }
 
@@ -138,7 +139,7 @@ export function getRemoteRenderPosition(snapshots: RemoteSnapshot[], renderTime:
     time: renderTime,
     x: prev.x + (next.x - prev.x) * alpha,
     y: prev.y + (next.y - prev.y) * alpha,
-    facing: lerpAngle(prev.facing, next.facing, alpha),
+    facingLeft: alpha < 0.5 ? prev.facingLeft : next.facingLeft,
   };
 }
 
@@ -167,21 +168,10 @@ function extrapolateSnapshot(snapshots: RemoteSnapshot[], renderTime: number) {
     time: renderTime,
     x: last.x + velocityX * overTime,
     y: last.y + velocityY * overTime,
-    facing: last.facing,
+    facingLeft: last.facingLeft,
   };
 }
 
 function clampToMap(value: number, mapHalfExtent: number) {
   return Math.max(-mapHalfExtent, Math.min(mapHalfExtent, value));
-}
-
-function lerpAngle(from: number, to: number, amount: number) {
-  const diff = wrapAngle(to - from);
-  return from + diff * amount;
-}
-
-function wrapAngle(angle: number) {
-  while (angle <= -Math.PI) angle += Math.PI * 2;
-  while (angle > Math.PI) angle -= Math.PI * 2;
-  return angle;
 }

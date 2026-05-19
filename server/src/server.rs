@@ -383,6 +383,39 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
+                    ClientRequest::EnterBorrow { borrow_id } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::EnterBorrow { id, borrow_id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING BORROW ENTER");
+                            break;
+                        }
+                    }
+                    ClientRequest::TraverseBorrow { direction } => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::TraverseBorrow { id, direction })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING BORROW TRAVERSE");
+                            break;
+                        }
+                    }
+                    ClientRequest::ExitBorrow => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::ExitBorrow { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING BORROW EXIT");
+                            break;
+                        }
+                    }
                     ClientRequest::ClientLog {
                         scope,
                         event,
@@ -464,7 +497,10 @@ async fn read_join_message(
             | ClientRequest::StartPuzzle { .. }
             | ClientRequest::CancelPuzzle
             | ClientRequest::PuzzleTap
-            | ClientRequest::PuzzleConnect { .. } => return Err(()),
+            | ClientRequest::PuzzleConnect { .. }
+            | ClientRequest::EnterBorrow { .. }
+            | ClientRequest::TraverseBorrow { .. }
+            | ClientRequest::ExitBorrow => return Err(()),
         }
     }
 }

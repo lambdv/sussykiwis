@@ -48,6 +48,14 @@ pub mod model {
             #[serde(rename = "toIndex")]
             to_index: usize,
         },
+        EnterBorrow {
+            #[serde(rename = "borrowId")]
+            borrow_id: Uuid,
+        },
+        TraverseBorrow {
+            direction: BorrowDirection,
+        },
+        ExitBorrow,
         ClientLog {
             scope: String,
             event: String,
@@ -192,6 +200,15 @@ pub mod model {
         pub to_index: usize,
     }
 
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BorrowDirection {
+        Up,
+        Down,
+        Left,
+        Right,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case")]
     pub enum PuzzleProjectionState {
@@ -227,6 +244,22 @@ pub mod model {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
+    pub struct KiwiBorrowSnapshot {
+        pub id: Uuid,
+        pub x: f32,
+        pub z: f32,
+        pub links: Vec<KiwiBorrowLink>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct KiwiBorrowLink {
+        pub direction: BorrowDirection,
+        pub borrow_id: Uuid,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct WorldSnapshot {
         pub tick: u64,
         pub server_time: u64,
@@ -239,6 +272,7 @@ pub mod model {
         pub players: Vec<SnapshotPlayer>,
         pub dead_bodies: Vec<SnapshotDeadBody>,
         pub puzzle_stations: Vec<PuzzleStationSnapshot>,
+        pub kiwi_borrows: Vec<KiwiBorrowSnapshot>,
         pub active_sabotages: Vec<ActiveSabotage>,
         pub meeting: Option<MeetingSnapshot>,
         pub win: Option<WinMessage>,
@@ -254,8 +288,10 @@ pub mod model {
         pub role: PlayerRole,
         pub x: f32,
         pub z: f32,
-        pub facing_yaw: f32,
+        // Authoritative facing direction
+        pub facing_left: bool,
         pub state: PlayerState,
+        pub current_borrow_id: Option<Uuid>,
         pub kill_cooldown_ends_at: u64,
         pub last_processed_seq: u32,
         pub completed_puzzle_count: usize,
