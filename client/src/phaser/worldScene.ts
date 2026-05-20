@@ -12,6 +12,7 @@ import {
 import { ClientSession, type ClientSessionState } from "../core/session";
 import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
 import { parseAuthoredMap, parseLobbyLayout, resolveAuthoredPosition, resolveLobbyPosition, type AuthoredMapLayout, type LobbyLayout } from "./lobbyLdtk";
+import { reconcileLocalPlayer } from "../core/movement";
 
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
@@ -168,7 +169,7 @@ export class WorldScene extends Phaser.Scene {
       this.lobbyMap?.setVisible(false);
       this.setMatchMapVisible(true);
       this.setMatchMapAlpha(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? 0.35 : 0.82);
-      this.updateMatchRoofVisibility(snapshot);
+      this.updateMatchRoofVisibility();
       this.cameras.main.setBackgroundColor(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? "#05070b" : "#bfe7ff");
       return;
     }
@@ -218,22 +219,16 @@ export class WorldScene extends Phaser.Scene {
       visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
       if (player.id === localPlayerId) {
-        // Keep the locally predicted position instead of snapping back to the latest snapshot.
-        // const reconciled = reconcileLocalPlayer(
-        //   player,
-        //   this.pendingInputs,
-        //   this.session.getMoveSpeed(),
-        //   getMapHalfExtents(snapshot),
-        //   snapshot.phase,
-        // );
-        // const resolved = this.resolveReconciledPosition(player, snapshot, reconciled.x, reconciled.y);
-        // visual.container.setPosition(resolved.x * 16, resolved.y * 16);
-        if (visual.lastInputFacingLeft !== null) {
-          visual.facingLeft = visual.lastInputFacingLeft;
-        } else {
-          // visual.facingLeft = reconciled.facingLeft;
-          visual.facingLeft = player.facingLeft;
-        }
+        const reconciled = reconcileLocalPlayer(
+          player,
+          this.pendingInputs,
+          this.session.getMoveSpeed(),
+          getMapHalfExtents(snapshot),
+          snapshot.phase,
+        );
+        // Snap the local player back to the authoritative state, then reapply only still-pending input.
+        visual.container.setPosition(reconciled.x * 16, reconciled.y * 16);
+        visual.facingLeft = visual.lastInputFacingLeft ?? reconciled.facingLeft;
       } else {
         visual.snapshots.push({
           time: snapshot.serverTime,
@@ -367,6 +362,11 @@ export class WorldScene extends Phaser.Scene {
     const visual = this.players.get(localPlayerId);
     if (!localPlayer || !visual) {
       return;
+    }
+
+    if (localPlayer.currentBorrowId === null) {
+      // Drop stale borrow predictions once the server says the player is back outside.
+      this.lastBorrowDirection = null;
     }
 
     const input = this.inputController?.getInput() ?? { x: 0, y: 0 };
@@ -714,22 +714,27 @@ const visual = {
     }
   }
 
-  private updateMatchRoofVisibility(snapshot: WorldSnapshot) {
+  private updateMatchRoofVisibility() {
     const caveRoof = this.matchLayers.get("CaveRoof");
     if (!caveRoof || !this.matchLayout) {
       return;
     }
 
-    const localPlayerId = this.state.localPlayerId;
-    const localVisual = localPlayerId ? this.players.get(localPlayerId) : null;
-    const localSnapshot = localPlayerId ? snapshot.players.find((player) => player.id === localPlayerId) : null;
-    if (!localVisual && !localSnapshot) {
+    if (this.state.viewMode === "spectator") {
+      // Keep the cave fully visible in openday.
       caveRoof.setVisible(true);
       return;
     }
 
-    const playerX = localVisual ? localVisual.container.x : (localSnapshot?.x ?? 0) * 16;
-    const playerY = localVisual ? localVisual.container.y : (localSnapshot?.z ?? 0) * 16;
+    const localPlayerId = this.state.localPlayerId;
+    const localVisual = localPlayerId ? this.players.get(localPlayerId) : null;
+    if (!localVisual) {
+      caveRoof.setVisible(true);
+      return;
+    }
+
+    const playerX = localVisual.container.x;
+    const playerY = localVisual.container.y;
     const hideRoof = this.matchLayout.hideZones.some((zone) => {
       if (zone.hideLayer !== "CaveRoof") {
         return false;

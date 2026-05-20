@@ -4,6 +4,7 @@ use std::f32::consts::TAU;
 use std::time::Duration;
 
 use ldtk2::Ldtk;
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info};
@@ -22,6 +23,7 @@ const MAX_PLAYERS: usize = 15;
 const KILL_RANGE: f32 = 4.0;
 const REPORT_RANGE: f32 = 4.0;
 const PUZZLE_RANGE: f32 = 4.5;
+const BORROW_RANGE_SQ: f32 = 20.25;
 pub const TICK_RATE: u32 = 20;
 pub const MOVE_SPEED: f32 = 10.0;
 const LOBBY_COUNTDOWN_SECONDS: u64 = 1;
@@ -130,6 +132,7 @@ struct Player {
     last_seq: u32,
     role: PlayerRole,
     state: PlayerState,
+    current_borrow_id: Option<Uuid>,
     kill_cooldown_ends_at_tick: u64,
     completed_puzzle_station_ids: HashSet<Uuid>,
 }
@@ -201,6 +204,41 @@ struct CollisionMap {
     solid: Vec<bool>,
 }
 
+#[derive(Deserialize)]
+struct LdtkProjectData {
+    levels: Vec<LdtkLevelData>,
+}
+
+#[derive(Deserialize)]
+struct LdtkLevelData {
+    #[serde(rename = "layerInstances")]
+    layer_instances: Vec<LdtkLayerData>,
+}
+
+#[derive(Deserialize)]
+struct LdtkLayerData {
+    #[serde(rename = "__identifier")]
+    identifier: String,
+    #[serde(rename = "__type")]
+    layer_type: String,
+    #[serde(rename = "__gridSize")]
+    grid_size: i64,
+    #[serde(rename = "__cWid")]
+    cell_width: i64,
+    #[serde(rename = "__cHei")]
+    cell_height: i64,
+    #[serde(rename = "entityInstances")]
+    entity_instances: Vec<LdtkEntityData>,
+}
+
+#[derive(Deserialize)]
+struct LdtkEntityData {
+    #[serde(rename = "__identifier")]
+    identifier: String,
+    iid: Uuid,
+    px: [i64; 2],
+}
+
 #[derive(Clone, Copy)]
 pub enum VoteTarget {
     Player(Uuid),
@@ -213,6 +251,7 @@ pub struct World {
     join_order: Vec<Uuid>,
     dead_bodies: HashMap<Uuid, DeadBody>,
     puzzle_stations: Vec<PuzzleStation>,
+    kiwi_borrows: Vec<KiwiBorrowSnapshot>,
     active_sabotages: Vec<ActiveSabotage>,
     phase: GamePhase,
     round_locked: bool,
@@ -237,6 +276,7 @@ impl World {
             join_order: Vec::new(),
             dead_bodies: HashMap::new(),
             puzzle_stations: create_puzzle_stations(),
+            kiwi_borrows: create_kiwi_borrows(),
             active_sabotages: Vec::new(),
             phase: GamePhase::Lobby,
             round_locked: false,
@@ -320,15 +360,14 @@ impl World {
                 from_index,
                 to_index,
             } => self.handle_puzzle_connect(id, from_index, to_index),
-            // Borrow movement is not wired into the simulation yet, so ignore these for now.
             GameCommand::EnterBorrow { id, borrow_id } => {
-                let _ = (id, borrow_id);
+                self.enter_borrow(id, borrow_id);
             }
             GameCommand::TraverseBorrow { id, direction } => {
-                let _ = (id, direction);
+                self.traverse_borrow(id, direction);
             }
             GameCommand::ExitBorrow { id } => {
-                let _ = id;
+                self.exit_borrow(id);
             }
         }
     }
@@ -362,6 +401,7 @@ impl World {
             last_seq: 0,
             role: PlayerRole::Crewmate,
             state: PlayerState::Alive,
+            current_borrow_id: None,
             kill_cooldown_ends_at_tick: 0,
             completed_puzzle_station_ids: HashSet::new(),
         };
@@ -437,6 +477,7 @@ impl World {
         // Meeting, ejection, and win phases freeze movement without dropping ack state.
         if !matches!(self.phase, GamePhase::Lobby | GamePhase::Playing)
             || !matches!(player.state, PlayerState::Alive | PlayerState::Ghost)
+            || player.current_borrow_id.is_some()
         {
             player.move_x = 0.0;
             player.move_z = 0.0;
@@ -923,7 +964,7 @@ impl World {
                         z: player.z,
                         facing_left: player.facing_left,
                         state: player.state,
-                        current_borrow_id: None,
+                        current_borrow_id: player.current_borrow_id,
                         // Send cooldown in rendered server-time units so the client can gate kills accurately.
                         kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000
                             / self.tick_rate as u64,
@@ -933,7 +974,7 @@ impl World {
                     })
                     .collect::<Vec<_>>(),
                 // Keep kiwi borrows aligned with the same playable LDtk space as tasks.
-                kiwi_borrows: create_kiwi_borrows(),
+                kiwi_borrows: self.kiwi_borrows.clone(),
                 dead_bodies: self
                     .dead_bodies
                     .values()
@@ -1017,6 +1058,95 @@ impl World {
         }
     }
 
+    fn enter_borrow(&mut self, player_id: Uuid, borrow_id: Uuid) {
+        let Some(player) = self.players.get(&player_id) else {
+            return;
+        };
+
+        if !matches!(self.phase, GamePhase::Playing) || !matches!(player.role, PlayerRole::Imposter) {
+            return;
+        }
+
+        if !self.is_near_borrow(player.x, player.z, borrow_id) {
+            return;
+        }
+
+        let next_borrow_id = self.pick_other_borrow(borrow_id, player_id);
+        self.teleport_player_to_borrow(player_id, next_borrow_id);
+    }
+
+    fn traverse_borrow(&mut self, player_id: Uuid, direction: BorrowDirection) {
+        let Some(player) = self.players.get(&player_id) else {
+            return;
+        };
+
+        let Some(current_borrow_id) = player.current_borrow_id else {
+            return;
+        };
+
+        let next_borrow_id = self
+            .kiwi_borrows
+            .iter()
+            .find(|borrow| borrow.id == current_borrow_id)
+            .and_then(|borrow| borrow.links.iter().find(|link| link.direction == direction))
+            .map(|link| link.borrow_id)
+            .unwrap_or_else(|| self.pick_other_borrow(current_borrow_id, player_id));
+
+        self.teleport_player_to_borrow(player_id, next_borrow_id);
+    }
+
+    fn exit_borrow(&mut self, player_id: Uuid) {
+        let Some(player) = self.players.get_mut(&player_id) else {
+            return;
+        };
+
+        player.current_borrow_id = None;
+        player.move_x = 0.0;
+        player.move_z = 0.0;
+    }
+
+    fn teleport_player_to_borrow(&mut self, player_id: Uuid, borrow_id: Uuid) {
+        let Some(borrow) = self.kiwi_borrows.iter().find(|borrow| borrow.id == borrow_id).cloned() else {
+            return;
+        };
+
+        let Some(player) = self.players.get_mut(&player_id) else {
+            return;
+        };
+
+        player.x = borrow.x;
+        player.z = borrow.z;
+        player.current_borrow_id = Some(borrow_id);
+        player.move_x = 0.0;
+        player.move_z = 0.0;
+    }
+
+    fn pick_other_borrow(&self, source_borrow_id: Uuid, player_id: Uuid) -> Uuid {
+        if self.kiwi_borrows.len() <= 1 {
+            return source_borrow_id;
+        }
+
+        let source_index = self
+            .kiwi_borrows
+            .iter()
+            .position(|borrow| borrow.id == source_borrow_id)
+            .expect("borrow must exist");
+        let seed = self.tick as u128 ^ player_id.as_u128() ^ source_borrow_id.as_u128();
+        let mut index = (seed % (self.kiwi_borrows.len() as u128 - 1)) as usize;
+        if index >= source_index {
+            index += 1;
+        }
+        self.kiwi_borrows[index].id
+    }
+
+    fn is_near_borrow(&self, x: f32, z: f32, borrow_id: Uuid) -> bool {
+        self.kiwi_borrows
+            .iter()
+            .find(|borrow| borrow.id == borrow_id)
+            .map(|borrow| distance_sq(x, z, borrow.x, borrow.z) <= BORROW_RANGE_SQ)
+            .unwrap_or(false)
+    }
+
     fn try_start_match(&mut self) {
         // Only lobby snapshots with enough players can own an active start countdown.
         if !matches!(self.phase, GamePhase::Lobby) || self.round_locked {
@@ -1073,6 +1203,7 @@ impl World {
             if let Some(player) = self.players.get_mut(&player_id) {
                 player.role = role;
                 player.state = PlayerState::Alive;
+                player.current_borrow_id = None;
                 player.kill_cooldown_ends_at_tick = 0;
                 player.move_x = 0.0;
                 player.move_z = 0.0;
@@ -1409,70 +1540,74 @@ fn create_wires_state(station_id: Uuid, player_id: Uuid) -> WiresPuzzleState {
 }
 
 fn create_puzzle_stations() -> Vec<PuzzleStation> {
-    // Place every station within walkable cells of the authored LDtk layout.
-    const LAYOUT: [(PuzzleKind, f32, f32); TOTAL_PUZZLES_PER_PLAYER] = [
-        (PuzzleKind::Timer, -5.5, -4.5),
-        (PuzzleKind::Wires, -2.5, -4.5),
-        (PuzzleKind::Timer, 0.5, -4.5),
-        (PuzzleKind::Wires, 3.5, -4.5),
-        (PuzzleKind::Timer, -5.5, -0.5),
-        (PuzzleKind::Wires, 3.5, -0.5),
-        (PuzzleKind::Timer, -5.5, 3.5),
-        (PuzzleKind::Wires, -2.5, 3.5),
-        (PuzzleKind::Timer, 0.5, 3.5),
-        (PuzzleKind::Wires, 3.5, 3.5),
-    ];
-
-    LAYOUT
+    load_entity_points(MATCH_LDTK_JSON, "Puzzles")
         .into_iter()
         .enumerate()
-        .map(|(index, (kind, x, z))| PuzzleStation {
-            id: Uuid::from_u128((index + 1) as u128),
-            kind,
-            x,
-            z,
+        .map(|(index, entity)| PuzzleStation {
+            id: entity.iid,
+            kind: if index % 2 == 0 { PuzzleKind::Timer } else { PuzzleKind::Wires },
+            x: entity.x,
+            z: entity.z,
             occupant: None,
         })
         .collect()
 }
 
 fn create_kiwi_borrows() -> Vec<KiwiBorrowSnapshot> {
-    // Expose a small vent network that sits inside the LDtk walkable corridors.
-    vec![
-        KiwiBorrowSnapshot {
-            id: Uuid::from_u128(101),
-            x: -4.5,
-            z: -2.0,
-            links: vec![KiwiBorrowLink {
-                direction: BorrowDirection::Right,
-                borrow_id: Uuid::from_u128(102),
-            }],
-        },
-        KiwiBorrowSnapshot {
-            id: Uuid::from_u128(102),
-            x: 1.0,
-            z: -2.0,
-            links: vec![
-                KiwiBorrowLink {
+    let vents = load_entity_points(MATCH_LDTK_JSON, "Vents");
+    vents
+        .iter()
+        .enumerate()
+        .map(|(index, vent)| {
+            let mut links = Vec::new();
+            if index > 0 {
+                links.push(KiwiBorrowLink {
                     direction: BorrowDirection::Left,
-                    borrow_id: Uuid::from_u128(101),
-                },
-                KiwiBorrowLink {
-                    direction: BorrowDirection::Down,
-                    borrow_id: Uuid::from_u128(103),
-                },
-            ],
-        },
-        KiwiBorrowSnapshot {
-            id: Uuid::from_u128(103),
-            x: 1.0,
-            z: 3.5,
-            links: vec![KiwiBorrowLink {
-                direction: BorrowDirection::Up,
-                borrow_id: Uuid::from_u128(102),
-            }],
-        },
-    ]
+                    borrow_id: vents[index - 1].iid,
+                });
+            }
+            if index + 1 < vents.len() {
+                links.push(KiwiBorrowLink {
+                    direction: BorrowDirection::Right,
+                    borrow_id: vents[index + 1].iid,
+                });
+            }
+
+            KiwiBorrowSnapshot {
+                id: vent.iid,
+                x: vent.x,
+                z: vent.z,
+                links,
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct EntityPoint {
+    iid: Uuid,
+    x: f32,
+    z: f32,
+}
+
+fn load_entity_points(ldtk_json: &str, layer_identifier: &str) -> Vec<EntityPoint> {
+    let project: LdtkProjectData = serde_json::from_str(ldtk_json).expect("LDtk JSON must deserialize");
+    let level = project.levels.into_iter().next().expect("LDtk must contain one level");
+    let layer = level
+        .layer_instances
+        .into_iter()
+        .find(|layer| layer.identifier == layer_identifier && layer.layer_type == "Entities")
+        .expect("LDtk must contain requested entity layer");
+
+    layer
+        .entity_instances
+        .into_iter()
+        .map(|entity| EntityPoint {
+            iid: entity.iid,
+            x: entity.px[0] as f32 / layer.grid_size as f32 - layer.cell_width as f32 / 2.0,
+            z: entity.px[1] as f32 / layer.grid_size as f32 - layer.cell_height as f32 / 2.0,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1502,6 +1637,7 @@ mod tests {
                     last_seq: 0,
                     role: PlayerRole::Crewmate,
                     state: PlayerState::Alive,
+                    current_borrow_id: None,
                     kill_cooldown_ends_at_tick: 0,
                     completed_puzzle_station_ids: HashSet::new(),
                 },
@@ -1563,6 +1699,7 @@ mod tests {
                 last_seq: 12,
                 role: PlayerRole::Imposter,
                 state: PlayerState::Ghost,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 99,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1625,6 +1762,7 @@ mod tests {
                     last_seq: 0,
                     role: PlayerRole::Crewmate,
                     state: PlayerState::Alive,
+                    current_borrow_id: None,
                     kill_cooldown_ends_at_tick: 0,
                     completed_puzzle_station_ids: HashSet::new(),
                 },
@@ -1671,6 +1809,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1679,6 +1818,92 @@ mod tests {
         world.try_start_match();
         assert_eq!(world.phase, GamePhase::Lobby);
         assert!(world.lobby_countdown_ends_at_tick.is_none());
+    }
+
+    #[test]
+    fn imposter_enters_borrow_and_teleports_to_another_borrow() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        world.phase = GamePhase::Playing;
+
+        let player_id = Uuid::new_v4();
+        let source_borrow = world.kiwi_borrows[0].id;
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Player-0".to_string(),
+                color: "#fff".to_string(),
+                x: world.kiwi_borrows[0].x,
+                z: world.kiwi_borrows[0].z,
+                facing_left: false,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Imposter,
+                state: PlayerState::Alive,
+                current_borrow_id: None,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+
+        world.enter_borrow(player_id, source_borrow);
+
+        let player = world.players.get(&player_id).expect("player present");
+        assert_ne!(player.current_borrow_id, Some(source_borrow));
+        assert!(player.current_borrow_id.is_some());
+        assert_eq!((player.x, player.z), {
+            let borrow_id = player.current_borrow_id.expect("borrow selected");
+            let borrow = world
+                .kiwi_borrows
+                .iter()
+                .find(|entry| entry.id == borrow_id)
+                .expect("destination borrow present");
+            (borrow.x, borrow.z)
+        });
+    }
+
+    #[test]
+    fn traversal_moves_between_borrows() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        world.phase = GamePhase::Playing;
+
+        let player_id = Uuid::new_v4();
+        let source_borrow = world.kiwi_borrows[0].id;
+        let next_borrow = world.kiwi_borrows[0].links[0].borrow_id;
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Player-1".to_string(),
+                color: "#fff".to_string(),
+                x: world.kiwi_borrows[0].x,
+                z: world.kiwi_borrows[0].z,
+                facing_left: false,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Imposter,
+                state: PlayerState::Alive,
+                current_borrow_id: Some(source_borrow),
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+
+        let direction = world.kiwi_borrows[0].links[0].direction;
+        world.traverse_borrow(player_id, direction);
+
+        let player = world.players.get(&player_id).expect("player present");
+        assert_eq!(player.current_borrow_id, Some(next_borrow));
+        let borrow = world
+            .kiwi_borrows
+            .iter()
+            .find(|entry| entry.id == next_borrow)
+            .expect("destination borrow present");
+        assert_eq!((player.x, player.z), (borrow.x, borrow.z));
     }
 
     #[test]
@@ -1709,6 +1934,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Imposter,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1727,6 +1953,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1745,6 +1972,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1763,6 +1991,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1827,6 +2056,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1882,6 +2112,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: completed_ids,
             },
@@ -1900,6 +2131,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Imposter,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
@@ -1943,6 +2175,7 @@ mod tests {
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
+                current_borrow_id: None,
                 kill_cooldown_ends_at_tick: 0,
                 completed_puzzle_station_ids: HashSet::new(),
             },
