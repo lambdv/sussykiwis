@@ -78,6 +78,10 @@ export type WelcomeMessage = {
   observer: boolean;
 };
 
+export type JoinRejectedMessage = {
+  reason: string;
+};
+
 export type GameStartedMessage = {
   role: PlayerRole;
 };
@@ -148,6 +152,7 @@ export type WorldSnapshot = {
 
 export type ServerMessage =
   | { type: "welcome"; playerId: string; name: string; tickRate: number; moveSpeed: number; observer: boolean }
+  | { type: "join_rejected"; reason: string }
   | { type: "game_started"; role: PlayerRole }
   | { type: "world_snapshot"; snapshot: WorldSnapshot }
   | { type: "meeting_started"; reportedBodyId: string }

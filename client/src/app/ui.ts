@@ -8,6 +8,17 @@ export function createAppUi(session: ClientSession) {
   const root = document.createElement("div");
   root.className = "app-ui";
 
+  const serverBrand = document.createElement("div");
+  serverBrand.className = "server-brand";
+  const brandText = document.createElement("div");
+  brandText.className = "server-brand-text";
+  brandText.textContent = "Think it, Plan it, Build it.";
+  const brandLogo = document.createElement("img");
+  brandLogo.className = "server-brand-logo";
+  brandLogo.src = "/assets/2d/vuwLogo.svg";
+  brandLogo.alt = "VUW logo";
+  serverBrand.append(brandText, brandLogo);
+
   const modal = document.createElement("div");
   modal.className = "route-modal";
   const modalCard = document.createElement("div");
@@ -31,7 +42,7 @@ export function createAppUi(session: ClientSession) {
   actions.className = "action-panel";
   const ejectionBanner = document.createElement("div");
   ejectionBanner.className = "ejection-banner";
-  root.append(modal, status, spectator, actions, ejectionBanner);
+  root.append(serverBrand, modal, status, spectator, actions, ejectionBanner);
   document.body.appendChild(root);
 
   const reportButton = createActionButton("Report");
@@ -133,12 +144,11 @@ export function createAppUi(session: ClientSession) {
     const lobbyStatus = state.snapshot ? formatLobbyStatus(state.snapshot) : null;
     const isLobby = state.snapshot?.phase === "lobby";
 
-    status.style.display = state.route === "world" || state.route === "roleAssignment" || state.route === "win"
+    // Only players need the status panel; spectator/server view stays clean.
+    status.style.display = state.viewMode === "player" && (state.route === "world" || state.route === "roleAssignment" || state.route === "win")
       ? "block"
       : "none";
     status.innerHTML = [
-      `<strong>Mode:</strong> ${state.viewMode}`,
-      state.snapshot ? `<strong>Phase:</strong> ${state.snapshot.phase}` : "",
       !isLobby ? `<strong>Role:</strong> ${state.localRole ?? "pending"}` : "",
       !isLobby && localPlayer ? `<strong>Tasks:</strong> ${localPlayer.completedPuzzleCount}/${localPlayer.totalPuzzleCount}` : "",
       lobbyStatus ?? state.notice,
@@ -146,16 +156,20 @@ export function createAppUi(session: ClientSession) {
 
     spectator.style.display = state.viewMode === "spectator" && state.snapshot ? "block" : "none";
     if (state.viewMode === "spectator" && state.snapshot) {
-      spectator.innerHTML = `<strong>Scan to Join!</strong><br /><canvas id="qrCanvas"></canvas><br /><strong>Joined players</strong><br />${state.snapshot.players.map((player) => player.name).join("<br />")}`;
+      // Spectator/server view only renders the join QR without extra lobby chrome.
+      serverBrand.style.display = "flex";
+      spectator.innerHTML = `<div class="spectator-label">Scan to Join</div><canvas id="qrCanvas"></canvas>`;
       const joinUrl = window.location.origin;
       setTimeout(() => {
         const canvas = document.getElementById("qrCanvas") as HTMLCanvasElement;
         if (canvas) {
-          QRCode.toCanvas(canvas, joinUrl, { margin: 1, width: 200 }, (error: any) => {
+          QRCode.toCanvas(canvas, joinUrl, { margin: 1, width: 320 }, (error: any) => {
             if (error) console.error(error);
           });
         }
       }, 0);
+    } else {
+      serverBrand.style.display = "none";
     }
 
     actions.style.display = state.viewMode === "player" && state.route === "world" && !isLobby ? "flex" : "none";
@@ -278,7 +292,7 @@ function formatLobbyStatus(snapshot: NonNullable<ClientSessionState["snapshot"]>
 
   const playersNeeded = Math.max(0, snapshot.expectedPlayers - snapshot.joinedPlayers);
   if (playersNeeded > 0) {
-    return `Waiting for players: ${snapshot.joinedPlayers}/${snapshot.expectedPlayers} joined. ${playersNeeded} more needed to start.`;
+    return `Lobby capacity: ${snapshot.joinedPlayers}/${snapshot.expectedPlayers}. ${playersNeeded} slots open.`;
   }
 
   if (snapshot.lobbyCountdownEndsAt === null) {

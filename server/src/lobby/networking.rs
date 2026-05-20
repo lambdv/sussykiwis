@@ -80,6 +80,9 @@ pub mod model {
             #[serde(rename = "observer")]
             observer: bool,
         },
+        JoinRejected {
+            reason: String,
+        },
         GameStarted {
             role: PlayerRole,
         },

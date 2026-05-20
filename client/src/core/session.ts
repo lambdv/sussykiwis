@@ -46,14 +46,20 @@ export class ClientSession {
   private joinRetryTimer: number | null = null;
   private hasShownRoleReveal = false;
   private previousSubState: WorldSnapshot["subState"] | null = null;
+  private reconnectViewMode: ViewMode | null = null;
 
   constructor() {
     this.network.onMessage((message) => {
       this.handleMessage(message);
     });
 
-    this.network.onDisconnect(() => {
+    this.network.onDisconnect((wasIntentional) => {
       this.patchState({ connected: false, notice: "Disconnected from server" });
+
+      // Retry the same join path automatically after an unexpected drop.
+      if (!wasIntentional && this.reconnectViewMode) {
+        this.startJoinLoop(this.reconnectViewMode);
+      }
     });
   }
 
@@ -73,6 +79,7 @@ export class ClientSession {
     this.joinToken += 1;
     this.clearTransientTimers();
     this.network.disconnect();
+    this.reconnectViewMode = null;
     this.hasShownRoleReveal = false;
     this.previousSubState = null;
     this.state = {
@@ -104,6 +111,7 @@ export class ClientSession {
     this.clearJoinRetryTimer();
     this.clearTransientTimers();
     this.network.disconnect();
+    this.reconnectViewMode = viewMode;
     this.hasShownRoleReveal = viewMode === "spectator";
     this.previousSubState = null;
     this.patchState({
@@ -189,6 +197,7 @@ export class ClientSession {
 
   dispose() {
     this.clearTransientTimers();
+    this.reconnectViewMode = null;
     this.network.disconnect();
     this.listeners.clear();
   }
@@ -199,7 +208,7 @@ export class ClientSession {
       route: "world",
       viewMode,
       connected: true,
-      notice: welcome.observer ? "Connected as observer" : `Connected as ${welcome.name}`,
+      notice: welcome.observer ? "Connected as observer" : "Connected",
       localPlayerId: welcome.observer ? null : welcome.playerId,
       localRole: null,
     });
@@ -248,9 +257,13 @@ export class ClientSession {
       case "welcome":
         this.patchState({
           connected: true,
-          notice: message.observer ? "Connected as observer" : `Connected as ${message.name}`,
+          notice: message.observer ? "Connected as observer" : "Connected",
           localPlayerId: message.observer ? null : message.playerId,
         });
+        break;
+
+      case "join_rejected":
+        this.patchState({ notice: message.reason });
         break;
 
       case "game_started":

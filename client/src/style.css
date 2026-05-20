@@ -33,6 +33,45 @@ body {
   pointer-events: none;
 }
 
+.server-brand {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.server-brand-text {
+  max-width: none;
+  white-space: nowrap;
+  color: #000;
+  font-size: clamp(28px, 3.4vw, 48px);
+  font-weight: 900;
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+  -webkit-text-stroke: 4px #fff;
+  paint-order: stroke fill;
+  text-shadow:
+    2px 0 #fff,
+    -2px 0 #fff,
+    0 2px #fff,
+    0 -2px #fff,
+    2px 2px #fff,
+    -2px -2px #fff,
+    2px -2px #fff,
+    -2px 2px #fff;
+}
+
+.server-brand-logo {
+  display: block;
+  width: min(320px, 60vw);
+  height: auto;
+  filter: drop-shadow(0 3px 0 #fff) drop-shadow(0 -3px 0 #fff) drop-shadow(3px 0 0 #fff) drop-shadow(-3px 0 0 #fff);
+}
+
 .route-modal {
   position: absolute;
   inset: 0;
@@ -98,7 +137,35 @@ body {
 }
 
 .spectator-panel {
-  top: 140px;
+  top: auto;
+  left: auto;
+  right: 16px;
+  bottom: 16px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: center;
+}
+
+.spectator-label {
+  margin-bottom: 10px;
+  font-size: 32px;
+  font-weight: 900;
+  color: #000;
+  -webkit-text-stroke: 3px #fff;
+  text-shadow:
+    2px 0 #fff,
+    -2px 0 #fff,
+    0 2px #fff,
+    0 -2px #fff,
+    2px 2px #fff,
+    -2px -2px #fff,
+    2px -2px #fff,
+    -2px 2px #fff;
+}
+
+.spectator-panel canvas {
+  display: block;
 }
 
 .action-panel {

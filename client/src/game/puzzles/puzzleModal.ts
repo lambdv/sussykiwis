@@ -153,7 +153,7 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
     }
 
     root.style.display = "flex";
-    title.textContent = station.kind === "timer" ? "Timer Calibration" : "Wire Routing";
+    title.textContent = station.kind === "timer" ? "Spin Tile" : "Connect The Neural Network";
     progress.textContent = currentState.player
       ? `Tasks ${currentState.player.completedPuzzleCount} / ${currentState.player.totalPuzzleCount}`
       : "Tasks syncing...";

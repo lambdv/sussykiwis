@@ -5,14 +5,13 @@ import {
   getFacingFromMovement,
   getMapHalfExtent,
   predictLocalPlayer,
-  reconcileLocalPlayer,
   updateRenderTime,
   type PendingInput,
   type RemoteSnapshot,
 } from "../core/movement";
 import { ClientSession, type ClientSessionState } from "../core/session";
 import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
-import { parseLobbyLayout, resolveLobbyPosition, type LobbyLayout } from "./lobbyLdtk";
+import { parseAuthoredMap, parseLobbyLayout, resolveLobbyPosition, type AuthoredMapLayout, type LobbyLayout } from "./lobbyLdtk";
 
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
@@ -48,6 +47,7 @@ export class WorldScene extends Phaser.Scene {
   // Keep the kiwi sprite compact so it reads as a character, not the whole tile.
   private static readonly PLAYER_BASE_SCALE = 0.05;
   private static readonly LOBBY_CAMERA_ZOOM = 4.5;
+  private static readonly IN_GAME_CAMERA_ZOOM = 2.4;
   private session: ClientSession;
   private unsubscribe: (() => void) | null = null;
   private inputController: PlayerInputController | null = null;
@@ -64,6 +64,9 @@ export class WorldScene extends Phaser.Scene {
   private arena!: Phaser.GameObjects.Graphics;
   private lobbyMap: Phaser.GameObjects.Container | null = null;
   private lobbyLayout: LobbyLayout | null = null;
+  private matchLayout: AuthoredMapLayout | null = null;
+  private matchMapParts: Array<Phaser.GameObjects.Container | Phaser.GameObjects.Rectangle> = [];
+  private matchLayers = new Map<string, Phaser.GameObjects.Container>();
 
   constructor(session: ClientSession) {
     super("world");
@@ -76,6 +79,7 @@ export class WorldScene extends Phaser.Scene {
     this.cameras.main.setBackgroundColor("#bfe7ff");
     this.arena = this.add.graphics();
     this.initializeLobbyMap();
+    this.initializeMatchMap();
     this.inputController = new PlayerInputController();
     this.unsubscribe = this.session.subscribe((state) => {
       this.state = state;
@@ -90,6 +94,12 @@ export class WorldScene extends Phaser.Scene {
       this.unsubscribe = null;
       this.lobbyMap?.destroy(true);
       this.lobbyMap = null;
+      this.matchLayout = null;
+      for (const part of this.matchMapParts) {
+        part.destroy(true);
+      }
+      this.matchMapParts = [];
+      this.matchLayers.clear();
       this.players.clear();
       this.bodies.clear();
       this.puzzles.clear();
@@ -102,6 +112,7 @@ export class WorldScene extends Phaser.Scene {
     this.load.image("kiwi-source", "/assets/2d/kwi.png");
     this.load.image("kiwi-fruit", "/assets/kiwis/kiwi_fruit.png");
     this.load.json("lobby-ldtk", "/assets/game.ldtk");
+    this.load.json("match-ldtk", "/assets/amongus.ldtk");
   }
 
   update(_time: number, delta: number) {
@@ -123,6 +134,7 @@ export class WorldScene extends Phaser.Scene {
     if (!snapshot) {
       this.arena.clear();
       this.lobbyMap?.setVisible(false);
+      this.setMatchMapVisible(false);
       return;
     }
 
@@ -134,14 +146,37 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private drawArena(snapshot: WorldSnapshot) {
-    if (snapshot.phase === "lobby" && this.lobbyMap) {
+    if (snapshot.phase === "lobby") {
+      const lobbyMap = this.lobbyMap;
+      if (!lobbyMap) {
+        return;
+      }
+
+      // Keep the authored lobby visible during pre-match.
       this.arena.clear();
-      this.lobbyMap.setVisible(true);
-      this.cameras.main.setBackgroundColor("#bfe7ff");
+      lobbyMap.setVisible(true);
+      this.setMatchMapVisible(false);
+      const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
+      lobbyMap.setAlpha(lightsOff ? 0.35 : 1);
+      this.cameras.main.setBackgroundColor(lightsOff ? "#05070b" : "#bfe7ff");
       return;
     }
 
-    this.lobbyMap?.setVisible(false);
+    if (this.matchMapParts.length > 0) {
+      // Swap the active round over to the dedicated amongus LDtk render.
+      this.arena.clear();
+      this.lobbyMap?.setVisible(false);
+      this.setMatchMapVisible(true);
+      this.setMatchMapAlpha(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? 0.35 : 0.82);
+      this.updateMatchRoofVisibility(snapshot);
+      this.cameras.main.setBackgroundColor(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? "#05070b" : "#bfe7ff");
+      return;
+    }
+
+    if (this.lobbyMap !== null) {
+      this.lobbyMap.setVisible(false);
+    }
+    this.setMatchMapVisible(false);
     // Determine the map boundaries. We add a visual padding of 4 units (64 pixels)
     // so that when the player reaches the map's boundary, the rendered borders are
     // further away from their position, avoiding a cramped feeling at the edges.
@@ -151,23 +186,15 @@ export class WorldScene extends Phaser.Scene {
     
     // Choose floor/border colors depending on active sabotages and game phase.
     const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
-    const baseColor = lightsOff ? 0x05070b : snapshot.phase === "lobby" ? 0xbfe7ff : 0x10263a;
-    const borderColor = lightsOff ? 0xf8fafc : snapshot.phase === "lobby" ? 0x7dd3fc : 0x7dd3fc;
+    const baseColor = lightsOff ? 0x05070b : 0x10263a;
+    const borderColor = 0x7dd3fc;
 
     // Draw the arena background and outer border boundaries with the visual padding.
     this.arena.clear();
     this.arena.fillStyle(baseColor, 1);
-    if (snapshot.phase === "lobby") {
-      this.arena.fillCircle(0, 0, drawExtent * 16);
-    } else {
-      this.arena.fillRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
-    }
+    this.arena.fillRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
     this.arena.lineStyle(6, borderColor, 1);
-    if (snapshot.phase === "lobby") {
-      this.arena.strokeCircle(0, 0, drawExtent * 16);
-    } else {
-      this.arena.strokeRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
-    }
+    this.arena.strokeRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
 
     // We do NOT set the camera bounds here. This simplifies camera following and 
     // prevents the camera from getting stuck or colliding at the top-left boundary, 
@@ -191,19 +218,21 @@ export class WorldScene extends Phaser.Scene {
       visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
       if (player.id === localPlayerId) {
-        const reconciled = reconcileLocalPlayer(
-          player,
-          this.pendingInputs,
-          this.session.getMoveSpeed(),
-          snapshot.mapHalfExtent,
-          snapshot.phase,
-        );
-        const resolved = this.resolveReconciledPosition(player, snapshot, reconciled.x, reconciled.y);
-        visual.container.setPosition(resolved.x * 16, resolved.y * 16);
+        // Keep the locally predicted position instead of snapping back to the latest snapshot.
+        // const reconciled = reconcileLocalPlayer(
+        //   player,
+        //   this.pendingInputs,
+        //   this.session.getMoveSpeed(),
+        //   snapshot.mapHalfExtent,
+        //   snapshot.phase,
+        // );
+        // const resolved = this.resolveReconciledPosition(player, snapshot, reconciled.x, reconciled.y);
+        // visual.container.setPosition(resolved.x * 16, resolved.y * 16);
         if (visual.lastInputFacingLeft !== null) {
           visual.facingLeft = visual.lastInputFacingLeft;
         } else {
-          visual.facingLeft = reconciled.facingLeft;
+          // visual.facingLeft = reconciled.facingLeft;
+          visual.facingLeft = player.facingLeft;
         }
       } else {
         visual.snapshots.push({
@@ -433,10 +462,10 @@ export class WorldScene extends Phaser.Scene {
     const drawExtent = mapHalfExtent + visualPadding;
 
     if (this.state.viewMode === "spectator") {
-      // Spectator camera is centered on the map and zoomed to fit the padded arena perfectly.
+      // Keep gameplay closer so the authored map no longer looks tiny in-match.
       this.cameras.main.stopFollow();
       this.cameras.main.centerOn(0, 0);
-      this.cameras.main.setZoom(Math.max(0.45, Math.min(1.1, 720 / (drawExtent * 32))));
+      this.cameras.main.setZoom(Math.max(WorldScene.IN_GAME_CAMERA_ZOOM, Math.min(3.2, 720 / (drawExtent * 32))));
       return;
     }
 
@@ -456,7 +485,7 @@ export class WorldScene extends Phaser.Scene {
       const zoomY = this.cameras.main.height / targetHeight;
       const zoom = snapshot.phase === "lobby"
         ? Math.max(WorldScene.LOBBY_CAMERA_ZOOM, Math.max(zoomX, zoomY))
-        : Math.max(zoomX, zoomY);
+        : Math.max(WorldScene.IN_GAME_CAMERA_ZOOM, Math.max(zoomX, zoomY));
 
       this.cameras.main.setZoom(zoom);
     }
@@ -465,22 +494,20 @@ export class WorldScene extends Phaser.Scene {
   private upsertPlayer(player: SnapshotPlayer) {
     const existing = this.players.get(player.id);
     if (existing) {
-      existing.label.setText(player.name);
       existing.sprite.setTexture(this.getPlayerTexture(player.color));
       return existing;
     }
 
     const sprite = this.add.sprite(0, 0, this.getPlayerTexture(player.color)).setScale(WorldScene.PLAYER_BASE_SCALE);
-    const label = this.add.text(0, -28, player.name, {
+    const label = this.add.text(0, -28, "", {
       fontFamily: "Arial, sans-serif",
       fontSize: "14px",
       color: "#f8fafc",
       stroke: "#020617",
       strokeThickness: 4,
       align: "center",
-    }).setOrigin(0.5);
-    const hitbox = this.add.rectangle(0, 0, 12, 12, 0xff0000, 0.3).setStrokeStyle(1, 0xff0000);
-    const container = this.add.container(player.x * 16, player.z * 16, [hitbox, sprite, label]);
+    }).setOrigin(0.5).setVisible(false);
+    const container = this.add.container(player.x * 16, player.z * 16, [sprite, label]);
     container.setDepth(10);
 
 const visual = {
@@ -565,6 +592,39 @@ const visual = {
     this.load.start();
   }
 
+  private initializeMatchMap() {
+    this.matchLayout = parseAuthoredMap(this.cache.json.get("match-ldtk"));
+    if (!this.matchLayout) {
+      return;
+    }
+
+    const textureKeys = new Map<string, string>();
+    const missingTextures: Array<{ key: string; path: string }> = [];
+    for (const layer of this.matchLayout.layers) {
+      if (textureKeys.has(layer.tilesetPath)) {
+        continue;
+      }
+
+      const key = `match-tiles-${textureKeys.size}`;
+      textureKeys.set(layer.tilesetPath, key);
+      if (!this.textures.exists(key)) {
+        missingTextures.push({ key, path: layer.tilesetPath });
+      }
+    }
+
+    if (missingTextures.length === 0) {
+      this.buildMatchMap(textureKeys);
+      return;
+    }
+
+    // Load every tileset once so the authored layer order can be reconstructed exactly.
+    for (const texture of missingTextures) {
+      this.load.image(texture.key, texture.path);
+    }
+    this.load.once(Phaser.Loader.Events.COMPLETE, () => this.buildMatchMap(textureKeys));
+    this.load.start();
+  }
+
   private buildLobbyMap(textureKey: string) {
     if (!this.lobbyLayout || this.lobbyMap) {
       return;
@@ -588,38 +648,103 @@ const visual = {
     }
 
     this.lobbyMap = lobbyMap;
+    this.syncSnapshot(this.state.snapshot);
+  }
+
+  private buildMatchMap(textureKeys: Map<string, string>) {
+    if (!this.matchLayout || this.matchMapParts.length > 0) {
+      return;
+    }
+
+    const levelWidth = this.matchLayout.width * this.matchLayout.gridSize;
+    const levelHeight = this.matchLayout.height * this.matchLayout.gridSize;
+    const background = this.add.rectangle(0, 0, levelWidth, levelHeight, 0xbfe7ff).setOrigin(0.5).setDepth(-1).setVisible(false);
+    this.matchMapParts.push(background);
+
+    // Rebuild each authored tile layer separately so roof tiles can sit above players.
+    for (const [index, layer] of this.matchLayout.layers.entries()) {
+      const container = this.add.container(0, 0).setDepth(layer.identifier === "CaveRoof" ? 20 + index : index).setVisible(false);
+      const textureKey = textureKeys.get(layer.tilesetPath);
+      if (!textureKey) {
+        continue;
+      }
+
+      for (const tile of layer.tiles) {
+        const image = this.add.sprite(
+          tile.px[0] - (levelWidth / 2),
+          tile.px[1] - (levelHeight / 2),
+          textureKey,
+        ).setOrigin(0, 0)
+          .setTexture(textureKey)
+          .setFrame(this.getTileFrame(textureKey, this.matchLayout.gridSize, tile.src[0], tile.src[1]));
+        container.add(image);
+      }
+
+      this.matchLayers.set(layer.identifier, container);
+      this.matchMapParts.push(container);
+    }
+
+    this.syncSnapshot(this.state.snapshot);
   }
 
   private getLobbyTileFrame(srcX: number, srcY: number) {
-    const frameName = `lobby-${srcX}-${srcY}`;
-    const texture = this.textures.get("lobby-tiles");
+    return this.getTileFrame("lobby-tiles", this.lobbyLayout?.gridSize ?? 16, srcX, srcY);
+  }
+
+  private getTileFrame(textureKey: string, gridSize: number, srcX: number, srcY: number) {
+    const frameName = `${textureKey}-${srcX}-${srcY}`;
+    const texture = this.textures.get(textureKey);
     if (!texture.has(frameName)) {
-      texture.add(frameName, 0, srcX, srcY, this.lobbyLayout?.gridSize ?? 16, this.lobbyLayout?.gridSize ?? 16);
+      texture.add(frameName, 0, srcX, srcY, gridSize, gridSize);
     }
     return frameName;
   }
 
-  private resolveReconciledPosition(player: SnapshotPlayer, snapshot: WorldSnapshot, predictedX: number, predictedY: number) {
-    if (snapshot.phase !== "lobby") {
-      return { x: predictedX, y: predictedY };
+  private setMatchMapVisible(visible: boolean) {
+    for (const part of this.matchMapParts) {
+      part.setVisible(visible);
+    }
+  }
+
+  private setMatchMapAlpha(alpha: number) {
+    for (const part of this.matchMapParts) {
+      part.setAlpha(alpha);
+    }
+  }
+
+  private updateMatchRoofVisibility(snapshot: WorldSnapshot) {
+    const caveRoof = this.matchLayers.get("CaveRoof");
+    if (!caveRoof || !this.matchLayout) {
+      return;
     }
 
-    let currentX = player.x;
-    let currentY = player.z;
-    for (const input of this.pendingInputs) {
-      const targetX = currentX + (input.moveX * this.session.getMoveSpeed() * input.dt);
-      const targetY = currentY + (input.moveY * this.session.getMoveSpeed() * input.dt);
-      const resolved = this.resolveLocalStep(currentX, currentY, targetX, targetY, snapshot.phase);
-      currentX = resolved.x;
-      currentY = resolved.y;
+    const localPlayerId = this.state.localPlayerId;
+    const localVisual = localPlayerId ? this.players.get(localPlayerId) : null;
+    const localSnapshot = localPlayerId ? snapshot.players.find((player) => player.id === localPlayerId) : null;
+    if (!localVisual && !localSnapshot) {
+      caveRoof.setVisible(true);
+      return;
     }
-    return { x: currentX, y: currentY };
+
+    const playerX = localVisual ? localVisual.container.x : (localSnapshot?.x ?? 0) * 16;
+    const playerY = localVisual ? localVisual.container.y : (localSnapshot?.z ?? 0) * 16;
+    const hideRoof = this.matchLayout.hideZones.some((zone) => {
+      if (zone.hideLayer !== "CaveRoof") {
+        return false;
+      }
+
+      // Use the authored zone rectangle directly so roof visibility follows the map data.
+      return playerX >= zone.x
+        && playerX < zone.x + zone.width
+        && playerY >= zone.y
+        && playerY < zone.y + zone.height;
+    });
+    caveRoof.setVisible(!hideRoof);
   }
 
   private resolveLocalStep(currentX: number, currentY: number, targetX: number, targetY: number, phase: WorldSnapshot["phase"]) {
-    if (phase !== "lobby") {
-      return { x: targetX, y: targetY };
-    }
+    // Keep client prediction aligned with server collision in every phase.
+    void phase;
     return resolveLobbyPosition(this.lobbyLayout, currentX, currentY, targetX, targetY);
   }
 
@@ -650,6 +775,7 @@ const visual = {
 
     const image = context.getImageData(0, 0, source.width, source.height);
     const { r, g, b } = parseHexColor(color);
+    const pastel = softenColor(r, g, b);
 
     for (let index = 0; index < image.data.length; index += 4) {
       const alpha = image.data[index + 3];
@@ -665,10 +791,11 @@ const visual = {
       }
 
       const base = red * 0.299 + green * 0.587 + blue * 0.114;
-      const intensity = Math.max(0.35, Math.min(1, base / 255));
-      image.data[index] = Math.round(r * intensity);
-      image.data[index + 1] = Math.round(g * intensity);
-      image.data[index + 2] = Math.round(b * intensity);
+      // Keep the body readable, but lift shadows so the kiwi stays pastel.
+      const intensity = Math.max(0.72, Math.min(1, base / 255));
+      image.data[index] = Math.round(pastel.r * intensity);
+      image.data[index + 1] = Math.round(pastel.g * intensity);
+      image.data[index + 2] = Math.round(pastel.b * intensity);
     }
 
     context.putImageData(image, 0, 0);
@@ -685,5 +812,14 @@ function parseHexColor(color: string) {
     r: Number.parseInt(normalized.slice(0, 2), 16) || 255,
     g: Number.parseInt(normalized.slice(2, 4), 16) || 255,
     b: Number.parseInt(normalized.slice(4, 6), 16) || 255,
+  };
+}
+
+function softenColor(r: number, g: number, b: number) {
+  // Blend the base color toward white so the skin reads brighter on the tiny sprite.
+  return {
+    r: Math.round(r + (255 - r) * 0.3),
+    g: Math.round(g + (255 - g) * 0.3),
+    b: Math.round(b + (255 - b) * 0.3),
   };
 }

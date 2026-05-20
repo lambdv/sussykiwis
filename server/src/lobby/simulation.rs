@@ -10,19 +10,21 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::lobby::networking::model::{
-    ActiveSabotage, BorrowDirection, Faction, GamePhase, GameSubState, MeetingChatMessage,
-    MeetingSnapshot, MeetingVoteCount, PlayerRole, PlayerState, PuzzleKind, PuzzleProjectionState,
-    PuzzleStationSnapshot, SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody,
-    SnapshotPlayer, WinMessage, WireColor, WireConnection, WorldSnapshot,
+    ActiveSabotage, BorrowDirection, Faction, GamePhase, GameSubState, KiwiBorrowLink,
+    KiwiBorrowSnapshot, MeetingChatMessage, MeetingSnapshot, MeetingVoteCount, PlayerRole,
+    PlayerState, PuzzleKind, PuzzleProjectionState, PuzzleStationSnapshot, SabotageKind,
+    ServerEvent, ServerResponse, SnapshotDeadBody, SnapshotPlayer, WinMessage, WireColor,
+    WireConnection, WorldSnapshot,
 };
 
 const MIN_PLAYERS: usize = 4;
+const MAX_PLAYERS: usize = 15;
 const KILL_RANGE: f32 = 4.0;
 const REPORT_RANGE: f32 = 4.0;
 const PUZZLE_RANGE: f32 = 4.5;
 pub const TICK_RATE: u32 = 20;
 pub const MOVE_SPEED: f32 = 10.0;
-const LOBBY_COUNTDOWN_SECONDS: u64 = 15;
+const LOBBY_COUNTDOWN_SECONDS: u64 = 1;
 const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
 const TIMER_TARGET_SIZE: f32 = 0.8;
 const TIMER_ROTATION_PER_TICK: f32 = 0.28;
@@ -247,7 +249,6 @@ pub struct World {
     tick: u64,
     tick_rate: u32,
     move_speed: f32,
-    map_half_extent: f32,
     lobby_collision: LobbyCollisionMap,
     lobby_map_half_extent: f32,
     event_tx: broadcast::Sender<ServerEvent>,
@@ -271,7 +272,6 @@ impl World {
             tick: 0,
             tick_rate: TICK_RATE,
             move_speed: MOVE_SPEED,
-            map_half_extent: 30.0,
             lobby_map_half_extent: lobby_collision.half_width.min(lobby_collision.half_height),
             lobby_collision,
             event_tx,
@@ -285,6 +285,7 @@ impl World {
         // Allow movement in pre-match lobby and active gameplay phases.
         if matches!(self.phase, GamePhase::Lobby | GamePhase::Playing) {
             let dt = 1.0 / self.tick_rate as f32;
+            let map_half_extent = self.current_map_half_extent();
 
             // Integrate the latest input for movable player states.
             for player in self.players.values_mut() {
@@ -299,8 +300,7 @@ impl World {
                     player.z,
                     target_x,
                     target_z,
-                    self.map_half_extent,
-                    self.phase,
+                    map_half_extent,
                     &self.lobby_collision,
                 );
             }
@@ -358,6 +358,17 @@ impl World {
     }
 
     fn handle_join(&mut self, id: Uuid, _name: String) {
+        if self.players.len() >= MAX_PLAYERS {
+            // Refuse joins beyond the lobby cap so the server stays authoritative.
+            let _ = self.event_tx.send(ServerEvent::Direct {
+                to: id,
+                message: ServerResponse::JoinRejected {
+                    reason: "Lobby is full".to_string(),
+                },
+            });
+            return;
+        }
+
         let (color_name, color) = pick_player_color(self.players.len());
         let (spawn_x, spawn_z) = pick_spawn_position(self.join_order.len());
 
@@ -918,7 +929,7 @@ impl World {
                 sub_state: self.current_sub_state(),
                 // Send player progress so pre-match UI can show waiting status.
                 joined_players: self.players.len(),
-                expected_players: MIN_PLAYERS,
+                expected_players: MAX_PLAYERS,
                 map_half_extent: self.current_map_half_extent(),
                 lobby_countdown_ends_at: self
                     .lobby_countdown_ends_at_tick
@@ -944,7 +955,8 @@ impl World {
                         total_puzzle_count: TOTAL_PUZZLES_PER_PLAYER,
                     })
                     .collect::<Vec<_>>(),
-                kiwi_borrows: vec![],
+                // Keep kiwi borrows aligned with the same playable LDtk space as tasks.
+                kiwi_borrows: create_kiwi_borrows(),
                 dead_bodies: self
                     .dead_bodies
                     .values()
@@ -1021,11 +1033,8 @@ impl World {
     }
 
     fn current_map_half_extent(&self) -> f32 {
-        if matches!(self.phase, GamePhase::Lobby) {
-            return self.lobby_map_half_extent;
-        }
-
-        self.map_half_extent
+        // Use the authored LDtk map extents for both lobby and active matches.
+        self.lobby_map_half_extent
     }
 
     fn try_start_match(&mut self) {
@@ -1420,17 +1429,18 @@ fn create_wires_state(station_id: Uuid, player_id: Uuid) -> WiresPuzzleState {
 }
 
 fn create_puzzle_stations() -> Vec<PuzzleStation> {
+    // Place every station within walkable cells of the authored LDtk layout.
     const LAYOUT: [(PuzzleKind, f32, f32); TOTAL_PUZZLES_PER_PLAYER] = [
-        (PuzzleKind::Timer, -20.0, -18.0),
-        (PuzzleKind::Wires, -8.0, -18.0),
-        (PuzzleKind::Timer, 4.0, -18.0),
-        (PuzzleKind::Wires, 16.0, -18.0),
-        (PuzzleKind::Timer, -20.0, -4.0),
-        (PuzzleKind::Wires, 16.0, -4.0),
-        (PuzzleKind::Timer, -20.0, 10.0),
-        (PuzzleKind::Wires, -8.0, 10.0),
-        (PuzzleKind::Timer, 4.0, 10.0),
-        (PuzzleKind::Wires, 16.0, 10.0),
+        (PuzzleKind::Timer, -5.5, -4.5),
+        (PuzzleKind::Wires, -2.5, -4.5),
+        (PuzzleKind::Timer, 0.5, -4.5),
+        (PuzzleKind::Wires, 3.5, -4.5),
+        (PuzzleKind::Timer, -5.5, -0.5),
+        (PuzzleKind::Wires, 3.5, -0.5),
+        (PuzzleKind::Timer, -5.5, 3.5),
+        (PuzzleKind::Wires, -2.5, 3.5),
+        (PuzzleKind::Timer, 0.5, 3.5),
+        (PuzzleKind::Wires, 3.5, 3.5),
     ];
 
     LAYOUT
@@ -1444,6 +1454,45 @@ fn create_puzzle_stations() -> Vec<PuzzleStation> {
             occupant: None,
         })
         .collect()
+}
+
+fn create_kiwi_borrows() -> Vec<KiwiBorrowSnapshot> {
+    // Expose a small vent network that sits inside the LDtk walkable corridors.
+    vec![
+        KiwiBorrowSnapshot {
+            id: Uuid::from_u128(101),
+            x: -4.5,
+            z: -2.0,
+            links: vec![KiwiBorrowLink {
+                direction: BorrowDirection::Right,
+                borrow_id: Uuid::from_u128(102),
+            }],
+        },
+        KiwiBorrowSnapshot {
+            id: Uuid::from_u128(102),
+            x: 1.0,
+            z: -2.0,
+            links: vec![
+                KiwiBorrowLink {
+                    direction: BorrowDirection::Left,
+                    borrow_id: Uuid::from_u128(101),
+                },
+                KiwiBorrowLink {
+                    direction: BorrowDirection::Down,
+                    borrow_id: Uuid::from_u128(103),
+                },
+            ],
+        },
+        KiwiBorrowSnapshot {
+            id: Uuid::from_u128(103),
+            x: 1.0,
+            z: 3.5,
+            links: vec![KiwiBorrowLink {
+                direction: BorrowDirection::Up,
+                borrow_id: Uuid::from_u128(102),
+            }],
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -1575,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn lobby_countdown_waits_thirty_seconds_before_starting() {
+    fn lobby_countdown_waits_one_second_before_starting() {
         let (event_tx, _) = broadcast::channel(16);
         let mut world = World::new(event_tx);
 
@@ -1906,7 +1955,7 @@ mod tests {
                 id: player_id,
                 name: "Player-0".to_string(),
                 color: "#fff".to_string(),
-                x: -6.2,
+                x: -5.2,
                 z: -6.5,
                 facing_left: false,
                 move_x: 1.0,
@@ -1923,11 +1972,7 @@ mod tests {
         world.tick();
 
         let player = world.players.get(&player_id).expect("player present");
-        assert!(
-            player.x <= -6.0,
-            "player should stop before the wall, got x={}",
-            player.x
-        );
+        assert!(player.x <= -5.0, "player should stop before the wall, got x={}", player.x);
     }
 }
 
@@ -1943,40 +1988,48 @@ fn resolve_position_for_phase(
     target_x: f32,
     target_z: f32,
     map_half_extent: f32,
-    phase: GamePhase,
     lobby_collision: &LobbyCollisionMap,
 ) -> (f32, f32) {
-    if !matches!(phase, GamePhase::Lobby) {
-        return (
-            target_x.clamp(-map_half_extent, map_half_extent),
-            target_z.clamp(-map_half_extent, map_half_extent),
-        );
-    }
+    let clamped_target_x = target_x.clamp(-map_half_extent, map_half_extent);
+    let clamped_target_z = target_z.clamp(-map_half_extent, map_half_extent);
 
-    // Resolve one axis at a time so players can still slide against authored lobby walls.
+    // Resolve one axis at a time so players can still slide against authored LDtk walls.
     let mut next_x = current_x;
     let mut next_z = current_z;
-    if !lobby_cell_is_solid(lobby_collision, target_x, current_z) {
-        next_x = target_x;
+    if !lobby_cell_is_solid(lobby_collision, clamped_target_x, current_z) {
+        next_x = clamped_target_x;
     }
-    if !lobby_cell_is_solid(lobby_collision, next_x, target_z) {
-        next_z = target_z;
+    if !lobby_cell_is_solid(lobby_collision, next_x, clamped_target_z) {
+        next_z = clamped_target_z;
     }
     (next_x, next_z)
 }
 
 fn lobby_cell_is_solid(collision: &LobbyCollisionMap, x: f32, z: f32) -> bool {
-    let cell_x = (x + collision.half_width).floor() as isize;
-    let cell_z = (z + collision.half_height).floor() as isize;
-    if cell_x < 0
-        || cell_z < 0
-        || cell_x >= collision.width as isize
-        || cell_z >= collision.height as isize
-    {
-        return true;
+    const PLAYER_HALF_EXTENT: f32 = 0.375;
+
+    let min_cell_x = ((x - PLAYER_HALF_EXTENT) + collision.half_width).floor() as isize;
+    let max_cell_x = ((x + PLAYER_HALF_EXTENT) + collision.half_width).floor() as isize;
+    let min_cell_z = ((z - PLAYER_HALF_EXTENT) + collision.half_height).floor() as isize;
+    let max_cell_z = ((z + PLAYER_HALF_EXTENT) + collision.half_height).floor() as isize;
+
+    for cell_z in min_cell_z..=max_cell_z {
+        for cell_x in min_cell_x..=max_cell_x {
+            if cell_x < 0
+                || cell_z < 0
+                || cell_x >= collision.width as isize
+                || cell_z >= collision.height as isize
+            {
+                return true;
+            }
+
+            if collision.solid[(cell_z as usize * collision.width) + cell_x as usize] {
+                return true;
+            }
+        }
     }
 
-    collision.solid[(cell_z as usize * collision.width) + cell_x as usize]
+    false
 }
 
 fn load_lobby_collision_map() -> LobbyCollisionMap {
@@ -2023,14 +2076,14 @@ fn facing_yaw_from_movement(move_x: f32, move_z: f32) -> f32 {
 }
 
 fn pick_player_color(index: usize) -> (&'static str, &'static str) {
-    // Use named colors so the player label reads as a role-like color.
+    // Use bright pastel colors so players stay readable and vibrant in-game.
     const COLORS: [(&str, &str); 6] = [
-        ("RED", "#ef4444"),
-        ("BLUE", "#3b82f6"),
-        ("GREEN", "#22c55e"),
-        ("YELLOW", "#eab308"),
-        ("PURPLE", "#a855f7"),
-        ("ORANGE", "#f97316"),
+        ("RED", "#fb7185"),
+        ("BLUE", "#60a5fa"),
+        ("GREEN", "#4ade80"),
+        ("YELLOW", "#fde047"),
+        ("PURPLE", "#c084fc"),
+        ("ORANGE", "#fdba74"),
     ];
     COLORS[index % COLORS.len()]
 }

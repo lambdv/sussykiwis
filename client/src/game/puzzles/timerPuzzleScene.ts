@@ -1,5 +1,8 @@
 import type { PuzzleProjectionState } from "../../networking/message";
 
+const kiwiBeakImage = new Image();
+kiwiBeakImage.src = "/assets/2d/kiwiBeak.png";
+
 export function drawTimerPuzzleScene(
   context: CanvasRenderingContext2D,
   width: number,
@@ -42,12 +45,15 @@ export function drawTimerPuzzleScene(
   context.save();
   context.translate(centerX, centerY);
   context.rotate(projection.dialAngle - Math.PI / 2);
-  context.strokeStyle = "#f472b6";
-  context.lineWidth = Math.max(10, width * 0.016);
-  context.beginPath();
-  context.moveTo(0, 0);
-  context.lineTo(radius * 0.92, 0);
-  context.stroke();
+  const tileSize = radius * 0.98;
+  if (kiwiBeakImage.complete && kiwiBeakImage.naturalWidth > 0) {
+    // Spin the beak tile directly from the puzzle angle so the server timing still drives the challenge.
+    context.scale(-1, 1);
+    context.drawImage(kiwiBeakImage, -tileSize / 2, -tileSize / 2, tileSize, tileSize);
+  } else {
+    context.fillStyle = "#f472b6";
+    context.fillRect(-tileSize / 2, -tileSize / 2, tileSize, tileSize);
+  }
   context.restore();
 
   context.fillStyle = "#f8fafc";
@@ -57,7 +63,7 @@ export function drawTimerPuzzleScene(
 
   context.fillStyle = "#cbd5e1";
   context.font = `${Math.round(width * 0.038)}px Arial`;
-  context.fillText("Tap when the dial reaches green", centerX, height * 0.88);
+  context.fillText("Tap when the beak tile reaches green", centerX, height * 0.88);
 }
 
 function drawPuzzleSyncMessage(

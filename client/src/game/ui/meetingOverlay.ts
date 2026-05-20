@@ -91,7 +91,7 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
         row.className = "meeting-row";
 
         const label = document.createElement("div");
-        label.textContent = `${player.name}${player.id === localPlayerId ? " (you)" : ""}`;
+        label.textContent = player.id === localPlayerId ? "You" : "Player";
 
         const vote = snapshot.meeting.voteCounts.find((entry) => entry.target === player.id);
         const voteLabel = document.createElement("div");
@@ -125,7 +125,7 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
       chat.replaceChildren();
       for (const message of snapshot.meeting.chat) {
         const line = document.createElement("div");
-        line.textContent = `${message.name}: ${message.message}`;
+        line.textContent = message.message;
         chat.appendChild(line);
       }
     },

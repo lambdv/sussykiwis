@@ -3,7 +3,7 @@ import { Logger, LOG_SCOPES } from "../logger";
 
 type MessageHandler = (msg: ServerMessage) => void;
 
-type DisconnectHandler = () => void;
+type DisconnectHandler = (wasIntentional: boolean) => void;
 
 const DEFAULT_MOVE_SPEED = 10.0;
 
@@ -13,7 +13,7 @@ export class NetworkClient {
   private messageHandlers = new Set<MessageHandler>();
   private disconnectHandlers = new Set<DisconnectHandler>();
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = Number.POSITIVE_INFINITY;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isDisconnecting = false;
   private nextInputSeqValue = 0;
@@ -100,7 +100,7 @@ export class NetworkClient {
       this.reconnectTimeout = null;
     }
 
-    this.disconnectHandlers.forEach((handler) => handler());
+    this.disconnectHandlers.forEach((handler) => handler(wasIntentional));
 
     if (!wasIntentional && this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
@@ -147,8 +147,15 @@ export class NetworkClient {
       };
 
       const offMessage = this.onMessage((message) => {
-        if (message.type !== "welcome") return;
-        settleWelcome(message);
+        if (message.type === "welcome") {
+          settleWelcome(message);
+          return;
+        }
+
+        if (message.type === "join_rejected") {
+          settleError(new Error(message.reason));
+          this.disconnect();
+        }
       });
 
       const offDisconnect = this.onDisconnect(() => {
