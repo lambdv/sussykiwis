@@ -3,14 +3,15 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::lobby::networking::model::{
-    ActiveSabotage, BorrowDirection, Faction, GamePhase, GameSubState, MeetingChatMessage, MeetingSnapshot,
-    MeetingVoteCount, PlayerRole, PlayerState, PuzzleKind, PuzzleProjectionState,
+    ActiveSabotage, BorrowDirection, Faction, GamePhase, GameSubState, MeetingChatMessage,
+    MeetingSnapshot, MeetingVoteCount, PlayerRole, PlayerState, PuzzleKind, PuzzleProjectionState,
     PuzzleStationSnapshot, SabotageKind, ServerEvent, ServerResponse, SnapshotDeadBody,
     SnapshotPlayer, WinMessage, WireColor, WireConnection, WorldSnapshot,
 };
@@ -25,6 +26,7 @@ const LOBBY_COUNTDOWN_SECONDS: u64 = 15;
 const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
 const TIMER_TARGET_SIZE: f32 = 0.8;
 const TIMER_ROTATION_PER_TICK: f32 = 0.28;
+const LOBBY_LDTK_JSON: &str = include_str!("../../../client/public/assets/game.ldtk");
 
 pub async fn start_simulation(
     mut game_rx: mpsc::Receiver<GameCommand>,
@@ -186,6 +188,43 @@ struct EjectionState {
     ejected_player_id: Option<Uuid>,
 }
 
+#[derive(Clone)]
+struct LobbyCollisionMap {
+    width: usize,
+    height: usize,
+    half_width: f32,
+    half_height: f32,
+    solid: Vec<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LdtkProject {
+    levels: Vec<LdtkLevel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LdtkLevel {
+    px_wid: u32,
+    px_hei: u32,
+    layer_instances: Vec<LdtkLayer>,
+}
+
+#[derive(Deserialize)]
+struct LdtkLayer {
+    #[serde(rename = "__identifier")]
+    identifier: String,
+    #[serde(rename = "__cWid")]
+    width: usize,
+    #[serde(rename = "__cHei")]
+    height: usize,
+    #[serde(rename = "__gridSize")]
+    grid_size: u32,
+    #[serde(default, rename = "intGridCsv")]
+    int_grid_csv: Vec<i32>,
+}
+
 #[derive(Clone, Copy)]
 pub enum VoteTarget {
     Player(Uuid),
@@ -209,11 +248,14 @@ pub struct World {
     tick_rate: u32,
     move_speed: f32,
     map_half_extent: f32,
+    lobby_collision: LobbyCollisionMap,
+    lobby_map_half_extent: f32,
     event_tx: broadcast::Sender<ServerEvent>,
 }
 
 impl World {
     pub fn new(event_tx: broadcast::Sender<ServerEvent>) -> Self {
+        let lobby_collision = load_lobby_collision_map();
         Self {
             players: HashMap::new(),
             join_order: Vec::new(),
@@ -230,6 +272,8 @@ impl World {
             tick_rate: TICK_RATE,
             move_speed: MOVE_SPEED,
             map_half_extent: 30.0,
+            lobby_map_half_extent: lobby_collision.half_width.min(lobby_collision.half_height),
+            lobby_collision,
             event_tx,
         }
     }
@@ -248,13 +292,16 @@ impl World {
                     continue;
                 }
 
-                player.x += player.move_x * self.move_speed * dt;
-                player.z += player.move_z * self.move_speed * dt;
-                (player.x, player.z) = clamp_position_to_phase_bounds(
+                let target_x = player.x + player.move_x * self.move_speed * dt;
+                let target_z = player.z + player.move_z * self.move_speed * dt;
+                (player.x, player.z) = resolve_position_for_phase(
                     player.x,
                     player.z,
+                    target_x,
+                    target_z,
                     self.map_half_extent,
                     self.phase,
+                    &self.lobby_collision,
                 );
             }
         }
@@ -501,7 +548,9 @@ impl World {
             return;
         };
 
-        if body.reported || distance_sq(actor.x, actor.z, body.x, body.z) > REPORT_RANGE * REPORT_RANGE {
+        if body.reported
+            || distance_sq(actor.x, actor.z, body.x, body.z) > REPORT_RANGE * REPORT_RANGE
+        {
             return;
         }
 
@@ -524,6 +573,9 @@ impl World {
             player.move_x = 0.0;
             player.move_z = 0.0;
         }
+
+        // Remove every body now that the meeting has started so the arena is cleaned up immediately.
+        self.dead_bodies.clear();
 
         info!(
             tick = self.tick,
@@ -615,12 +667,14 @@ impl World {
             meeting.chat.remove(0);
         }
 
-        let _ = self.event_tx.send(ServerEvent::Broadcast(ServerResponse::MeetingChat {
-            player_id: entry.player_id,
-            name: entry.name,
-            message: entry.message,
-            server_time: entry.server_time,
-        }));
+        let _ = self
+            .event_tx
+            .send(ServerEvent::Broadcast(ServerResponse::MeetingChat {
+                player_id: entry.player_id,
+                name: entry.name,
+                message: entry.message,
+                server_time: entry.server_time,
+            }));
     }
 
     fn handle_sabotage(&mut self, id: Uuid, kind: SabotageKind) {
@@ -638,7 +692,11 @@ impl World {
         }
 
         // Keep sabotage simple for the slice: one active instance per kind with a fixed timer.
-        if self.active_sabotages.iter().any(|sabotage| sabotage.kind == kind) {
+        if self
+            .active_sabotages
+            .iter()
+            .any(|sabotage| sabotage.kind == kind)
+        {
             return;
         }
 
@@ -650,7 +708,8 @@ impl World {
     }
 
     fn handle_start_puzzle(&mut self, id: Uuid, station_id: Uuid) {
-        if !matches!(self.phase, GamePhase::Playing) || self.active_station_for_player(id).is_some() {
+        if !matches!(self.phase, GamePhase::Playing) || self.active_station_for_player(id).is_some()
+        {
             return;
         }
 
@@ -666,7 +725,11 @@ impl World {
             return;
         }
 
-        let Some(station) = self.puzzle_stations.iter_mut().find(|station| station.id == station_id) else {
+        let Some(station) = self
+            .puzzle_stations
+            .iter_mut()
+            .find(|station| station.id == station_id)
+        else {
             return;
         };
 
@@ -708,9 +771,11 @@ impl World {
                 Some(PuzzleOccupant {
                     player_id,
                     state: ActivePuzzleState::Timer(timer),
-                }) if *player_id == id => {
-                    angle_in_arc(current_timer_angle(self.tick, timer), timer.target_start, TIMER_TARGET_SIZE)
-                }
+                }) if *player_id == id => angle_in_arc(
+                    current_timer_angle(self.tick, timer),
+                    timer.target_start,
+                    TIMER_TARGET_SIZE,
+                ),
                 _ => return,
             };
 
@@ -756,9 +821,10 @@ impl World {
                 }) if *player_id == id => {
                     if from_index >= wires.left_colors.len()
                         || to_index >= wires.right_colors.len()
-                        || wires.connected_pairs.iter().any(|pair| {
-                            pair.from_index == from_index || pair.to_index == to_index
-                        })
+                        || wires
+                            .connected_pairs
+                            .iter()
+                            .any(|pair| pair.from_index == from_index || pair.to_index == to_index)
                         || wires.left_colors[from_index] != wires.right_colors[to_index]
                     {
                         return;
@@ -803,7 +869,8 @@ impl World {
 
             // Keep sessions active only while the authoritative player remains eligible and nearby.
             if !can_work_puzzles(player)
-                || distance_sq(player.x, player.z, station.x, station.z) > PUZZLE_RANGE * PUZZLE_RANGE
+                || distance_sq(player.x, player.z, station.x, station.z)
+                    > PUZZLE_RANGE * PUZZLE_RANGE
             {
                 players_to_release.push(occupant.player_id);
             }
@@ -852,8 +919,10 @@ impl World {
                 // Send player progress so pre-match UI can show waiting status.
                 joined_players: self.players.len(),
                 expected_players: MIN_PLAYERS,
-                map_half_extent: self.map_half_extent,
-                lobby_countdown_ends_at: self.lobby_countdown_ends_at_tick.map(|tick| tick * 1000 / self.tick_rate as u64),
+                map_half_extent: self.current_map_half_extent(),
+                lobby_countdown_ends_at: self
+                    .lobby_countdown_ends_at_tick
+                    .map(|tick| tick * 1000 / self.tick_rate as u64),
                 players: self
                     .players
                     .values()
@@ -868,7 +937,8 @@ impl World {
                         state: player.state,
                         current_borrow_id: None,
                         // Send cooldown in rendered server-time units so the client can gate kills accurately.
-                        kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000 / self.tick_rate as u64,
+                        kill_cooldown_ends_at: player.kill_cooldown_ends_at_tick * 1000
+                            / self.tick_rate as u64,
                         last_processed_seq: player.last_seq,
                         completed_puzzle_count: player.completed_puzzle_station_ids.len(),
                         total_puzzle_count: TOTAL_PUZZLES_PER_PLAYER,
@@ -901,22 +971,26 @@ impl World {
                             .filter(|player_id| {
                                 self.players
                                     .get(player_id)
-                                    .map(|player| player.completed_puzzle_station_ids.contains(&station.id))
+                                    .map(|player| {
+                                        player.completed_puzzle_station_ids.contains(&station.id)
+                                    })
                                     .unwrap_or(false)
                             })
                             .copied()
                             .collect::<Vec<_>>(),
-                        projection: station.occupant.as_ref().map(|occupant| match &occupant.state {
-                            ActivePuzzleState::Timer(timer) => PuzzleProjectionState::Timer {
-                                dial_angle: current_timer_angle(self.tick, timer),
-                                target_start: timer.target_start,
-                                target_size: TIMER_TARGET_SIZE,
-                            },
-                            ActivePuzzleState::Wires(wires) => PuzzleProjectionState::Wires {
-                                left_colors: wires.left_colors.to_vec(),
-                                right_colors: wires.right_colors.to_vec(),
-                                connected_pairs: wires.connected_pairs.clone(),
-                            },
+                        projection: station.occupant.as_ref().map(|occupant| {
+                            match &occupant.state {
+                                ActivePuzzleState::Timer(timer) => PuzzleProjectionState::Timer {
+                                    dial_angle: current_timer_angle(self.tick, timer),
+                                    target_start: timer.target_start,
+                                    target_size: TIMER_TARGET_SIZE,
+                                },
+                                ActivePuzzleState::Wires(wires) => PuzzleProjectionState::Wires {
+                                    left_colors: wires.left_colors.to_vec(),
+                                    right_colors: wires.right_colors.to_vec(),
+                                    connected_pairs: wires.connected_pairs.clone(),
+                                },
+                            }
                         }),
                     })
                     .collect::<Vec<_>>(),
@@ -946,6 +1020,14 @@ impl World {
         }
     }
 
+    fn current_map_half_extent(&self) -> f32 {
+        if matches!(self.phase, GamePhase::Lobby) {
+            return self.lobby_map_half_extent;
+        }
+
+        self.map_half_extent
+    }
+
     fn try_start_match(&mut self) {
         // Only lobby snapshots with enough players can own an active start countdown.
         if !matches!(self.phase, GamePhase::Lobby) || self.round_locked {
@@ -959,12 +1041,15 @@ impl World {
         }
 
         if self.lobby_countdown_ends_at_tick.is_none() {
-            self.lobby_countdown_ends_at_tick = Some(
-                self.tick + (self.tick_rate as u64 * LOBBY_COUNTDOWN_SECONDS),
-            );
+            self.lobby_countdown_ends_at_tick =
+                Some(self.tick + (self.tick_rate as u64 * LOBBY_COUNTDOWN_SECONDS));
         }
 
-        if self.tick < self.lobby_countdown_ends_at_tick.expect("countdown just initialized") {
+        if self.tick
+            < self
+                .lobby_countdown_ends_at_tick
+                .expect("countdown just initialized")
+        {
             return;
         }
 
@@ -1105,7 +1190,12 @@ impl World {
             .into_iter()
             .map(|(target, votes)| MeetingVoteCount { target, votes })
             .collect::<Vec<_>>();
-        result.sort_by_key(|entry| entry.target.map(|id| id.to_string()).unwrap_or_else(|| "skip".to_string()));
+        result.sort_by_key(|entry| {
+            entry
+                .target
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "skip".to_string())
+        });
         result
     }
 
@@ -1175,20 +1265,24 @@ impl World {
                 .players
                 .values()
                 .filter(|player| is_task_role(player.role))
-                .all(|player| player.completed_puzzle_station_ids.len() >= TOTAL_PUZZLES_PER_PLAYER);
+                .all(|player| {
+                    player.completed_puzzle_station_ids.len() >= TOTAL_PUZZLES_PER_PLAYER
+                });
 
         let alive_imposters = self
             .players
             .values()
             .filter(|player| {
-                matches!(player.state, PlayerState::Alive) && matches!(player.role, PlayerRole::Imposter)
+                matches!(player.state, PlayerState::Alive)
+                    && matches!(player.role, PlayerRole::Imposter)
             })
             .count();
         let alive_non_imposters = self
             .players
             .values()
             .filter(|player| {
-                matches!(player.state, PlayerState::Alive) && !matches!(player.role, PlayerRole::Imposter)
+                matches!(player.state, PlayerState::Alive)
+                    && !matches!(player.role, PlayerRole::Imposter)
             })
             .count();
 
@@ -1304,7 +1398,12 @@ fn pick_timer_target_start(station_id: Uuid, player_id: Uuid) -> f32 {
 }
 
 fn create_wires_state(station_id: Uuid, player_id: Uuid) -> WiresPuzzleState {
-    let right_colors = [WireColor::Red, WireColor::Blue, WireColor::Yellow, WireColor::Green];
+    let right_colors = [
+        WireColor::Red,
+        WireColor::Blue,
+        WireColor::Yellow,
+        WireColor::Green,
+    ];
     let mut left_colors = right_colors;
     let seed = (station_id.as_u128() ^ player_id.as_u128()) as usize;
     let len = left_colors.len();
@@ -1510,7 +1609,10 @@ mod tests {
             Some(world.tick + (world.tick_rate as u64 * LOBBY_COUNTDOWN_SECONDS))
         );
 
-        world.tick = world.lobby_countdown_ends_at_tick.expect("countdown present") - 1;
+        world.tick = world
+            .lobby_countdown_ends_at_tick
+            .expect("countdown present")
+            - 1;
         world.try_start_match();
         assert_eq!(world.phase, GamePhase::Lobby);
 
@@ -1646,13 +1748,15 @@ mod tests {
         assert_eq!(world.dead_bodies.len(), 1);
 
         let killer = world.players.get(&killer_id).expect("killer present");
-        assert_eq!(killer.kill_cooldown_ends_at_tick, world.tick + (world.tick_rate as u64 * 30));
+        assert_eq!(
+            killer.kill_cooldown_ends_at_tick,
+            world.tick + (world.tick_rate as u64 * 30)
+        );
 
         world.sync();
 
-        let ServerEvent::Broadcast(ServerResponse::WorldSnapshot { snapshot }) = event_rx
-            .try_recv()
-            .expect("world snapshot broadcasted")
+        let ServerEvent::Broadcast(ServerResponse::WorldSnapshot { snapshot }) =
+            event_rx.try_recv().expect("world snapshot broadcasted")
         else {
             panic!("expected world snapshot event");
         };
@@ -1709,12 +1813,14 @@ mod tests {
 
         world.handle_puzzle_tap(player_id);
 
-        assert!(world
-            .players
-            .get(&player_id)
-            .expect("player present")
-            .completed_puzzle_station_ids
-            .contains(&station_id));
+        assert!(
+            world
+                .players
+                .get(&player_id)
+                .expect("player present")
+                .completed_puzzle_station_ids
+                .contains(&station_id)
+        );
         assert!(world.puzzle_stations[0].occupant.is_none());
     }
 
@@ -1788,7 +1894,7 @@ mod tests {
     }
 
     #[test]
-    fn lobby_movement_clamps_to_circle() {
+    fn lobby_movement_stops_at_ldtk_walls() {
         let (event_tx, _) = broadcast::channel(16);
         let mut world = World::new(event_tx);
         let player_id = Uuid::new_v4();
@@ -1800,11 +1906,11 @@ mod tests {
                 id: player_id,
                 name: "Player-0".to_string(),
                 color: "#fff".to_string(),
-                x: 29.0,
-                z: 0.0,
+                x: -6.2,
+                z: -6.5,
                 facing_left: false,
                 move_x: 1.0,
-                move_z: 1.0,
+                move_z: 0.0,
                 last_seq: 0,
                 role: PlayerRole::Crewmate,
                 state: PlayerState::Alive,
@@ -1818,8 +1924,9 @@ mod tests {
 
         let player = world.players.get(&player_id).expect("player present");
         assert!(
-            (player.x * player.x) + (player.z * player.z)
-                <= (world.map_half_extent * world.map_half_extent) + 0.001
+            player.x <= -6.0,
+            "player should stop before the wall, got x={}",
+            player.x
         );
     }
 }
@@ -1830,28 +1937,85 @@ fn distance_sq(ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
     (dx * dx) + (dz * dz)
 }
 
-fn clamp_position_to_phase_bounds(
-    x: f32,
-    z: f32,
+fn resolve_position_for_phase(
+    current_x: f32,
+    current_z: f32,
+    target_x: f32,
+    target_z: f32,
     map_half_extent: f32,
     phase: GamePhase,
+    lobby_collision: &LobbyCollisionMap,
 ) -> (f32, f32) {
     if !matches!(phase, GamePhase::Lobby) {
         return (
-            x.clamp(-map_half_extent, map_half_extent),
-            z.clamp(-map_half_extent, map_half_extent),
+            target_x.clamp(-map_half_extent, map_half_extent),
+            target_z.clamp(-map_half_extent, map_half_extent),
         );
     }
 
-    // Keep the pre-match lobby circular while the in-match arena stays square.
-    let distance_sq = (x * x) + (z * z);
-    let radius_sq = map_half_extent * map_half_extent;
-    if distance_sq <= radius_sq || distance_sq == 0.0 {
-        return (x, z);
+    // Resolve one axis at a time so players can still slide against authored lobby walls.
+    let mut next_x = current_x;
+    let mut next_z = current_z;
+    if !lobby_cell_is_solid(lobby_collision, target_x, current_z) {
+        next_x = target_x;
+    }
+    if !lobby_cell_is_solid(lobby_collision, next_x, target_z) {
+        next_z = target_z;
+    }
+    (next_x, next_z)
+}
+
+fn lobby_cell_is_solid(collision: &LobbyCollisionMap, x: f32, z: f32) -> bool {
+    let cell_x = (x + collision.half_width).floor() as isize;
+    let cell_z = (z + collision.half_height).floor() as isize;
+    if cell_x < 0
+        || cell_z < 0
+        || cell_x >= collision.width as isize
+        || cell_z >= collision.height as isize
+    {
+        return true;
     }
 
-    let scale = map_half_extent / distance_sq.sqrt();
-    (x * scale, z * scale)
+    collision.solid[(cell_z as usize * collision.width) + cell_x as usize]
+}
+
+fn load_lobby_collision_map() -> LobbyCollisionMap {
+    let project: LdtkProject =
+        serde_json::from_str(LOBBY_LDTK_JSON).expect("lobby LDtk must deserialize");
+    let level = project
+        .levels
+        .into_iter()
+        .next()
+        .expect("lobby LDtk must contain one level");
+    let level_width = level.px_wid;
+    let level_height = level.px_hei;
+    let collisions = level
+        .layer_instances
+        .into_iter()
+        .find(|layer| layer.identifier == "Collisions")
+        .expect("lobby LDtk must contain collisions layer");
+    let width = if collisions.width > 0 {
+        collisions.width
+    } else {
+        (level_width / collisions.grid_size) as usize
+    };
+    let height = if collisions.height > 0 {
+        collisions.height
+    } else {
+        (level_height / collisions.grid_size) as usize
+    };
+
+    LobbyCollisionMap {
+        width,
+        height,
+        half_width: width as f32 / 2.0,
+        half_height: height as f32 / 2.0,
+        solid: collisions
+            .int_grid_csv
+            .into_iter()
+            .map(|value| value != 0)
+            .collect(),
+    }
 }
 
 fn facing_yaw_from_movement(move_x: f32, move_z: f32) -> f32 {

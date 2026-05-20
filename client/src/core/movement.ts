@@ -40,24 +40,12 @@ export function getFacingFromMovement(x: number, _y: number) {
   return x < 0;
 }
 
-export function clampToPhaseBounds(x: number, y: number, mapHalfExtent: number, phase: GamePhase) {
-  if (phase !== "lobby") {
-    return {
-      x: clampToMap(x, mapHalfExtent),
-      y: clampToMap(y, mapHalfExtent),
-    };
-  }
-
-  const distanceSq = (x * x) + (y * y);
-  const radiusSq = mapHalfExtent * mapHalfExtent;
-  if (distanceSq <= radiusSq || distanceSq === 0) {
-    return { x, y };
-  }
-
-  const scale = mapHalfExtent / Math.sqrt(distanceSq);
+export function clampToPhaseBounds(x: number, y: number, mapHalfExtent: number, _phase: GamePhase) {
+  // Keep client prediction inside the snapshot extents and let authored lobby collisions
+  // in the scene handle the finer blocking rules.
   return {
-    x: x * scale,
-    y: y * scale,
+    x: clampToMap(x, mapHalfExtent),
+    y: clampToMap(y, mapHalfExtent),
   };
 }
 

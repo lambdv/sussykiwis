@@ -18,9 +18,9 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+use crate::lobby::networking::model::{ClientRequest, ServerResponse};
 use crate::lobby::simulation::start_simulation;
 use crate::lobby::simulation::{MOVE_SPEED, TICK_RATE};
-use crate::lobby::networking::model::{ClientRequest, ServerResponse};
 use crate::{GameCommand, ServerEvent};
 
 // server configuration
@@ -444,7 +444,10 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
 
     // Notify game loop about disconnect and stop forwarding task.
     if !is_spectator {
-        let _ = context.command_tx.send(GameCommand::PlayerLeft { id }).await;
+        let _ = context
+            .command_tx
+            .send(GameCommand::PlayerLeft { id })
+            .await;
     }
     info!(client_id = %id, "SERVER WS SESSION ENDED");
     writer_task.abort();

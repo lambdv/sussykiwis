@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use uuid::Uuid;
 
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,7 +45,6 @@ pub enum ServerEvent {
     PlayerLeft(Uuid),
     WorldSnapshot(WorldSnapshot),
 }
-
 
 #[derive(Clone, Debug)]
 pub struct WorldSnapshot {

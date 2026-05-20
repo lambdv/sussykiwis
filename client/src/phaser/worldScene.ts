@@ -12,6 +12,7 @@ import {
 } from "../core/movement";
 import { ClientSession, type ClientSessionState } from "../core/session";
 import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
+import { parseLobbyLayout, resolveLobbyPosition, type LobbyLayout } from "./lobbyLdtk";
 
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
@@ -27,7 +28,7 @@ type PlayerVisual = {
 };
 
 type BodyVisual = {
-  body: Phaser.GameObjects.Rectangle;
+  body: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Sprite;
 };
 
 type PuzzleVisual = {
@@ -45,7 +46,8 @@ type BorrowVisual = {
 
 export class WorldScene extends Phaser.Scene {
   // Keep the kiwi sprite compact so it reads as a character, not the whole tile.
-  private static readonly PLAYER_BASE_SCALE = 0.3;
+  private static readonly PLAYER_BASE_SCALE = 0.05;
+  private static readonly LOBBY_CAMERA_ZOOM = 4.5;
   private session: ClientSession;
   private unsubscribe: (() => void) | null = null;
   private inputController: PlayerInputController | null = null;
@@ -60,6 +62,8 @@ export class WorldScene extends Phaser.Scene {
   private puzzles = new Map<string, PuzzleVisual>();
   private borrows = new Map<string, BorrowVisual>();
   private arena!: Phaser.GameObjects.Graphics;
+  private lobbyMap: Phaser.GameObjects.Container | null = null;
+  private lobbyLayout: LobbyLayout | null = null;
 
   constructor(session: ClientSession) {
     super("world");
@@ -69,8 +73,9 @@ export class WorldScene extends Phaser.Scene {
 
   create() {
     // Keep a single top-down scene alive while overlays swap around it.
-    this.cameras.main.setBackgroundColor("#08111f");
+    this.cameras.main.setBackgroundColor("#bfe7ff");
     this.arena = this.add.graphics();
+    this.initializeLobbyMap();
     this.inputController = new PlayerInputController();
     this.unsubscribe = this.session.subscribe((state) => {
       this.state = state;
@@ -83,6 +88,8 @@ export class WorldScene extends Phaser.Scene {
       this.inputController?.dispose();
       this.unsubscribe?.();
       this.unsubscribe = null;
+      this.lobbyMap?.destroy(true);
+      this.lobbyMap = null;
       this.players.clear();
       this.bodies.clear();
       this.puzzles.clear();
@@ -93,6 +100,8 @@ export class WorldScene extends Phaser.Scene {
   preload() {
     // Load the shared kiwi source sprite once, then recolor it per player in memory.
     this.load.image("kiwi-source", "/assets/2d/kwi.png");
+    this.load.image("kiwi-fruit", "/assets/kiwis/kiwi_fruit.png");
+    this.load.json("lobby-ldtk", "/assets/game.ldtk");
   }
 
   update(_time: number, delta: number) {
@@ -113,6 +122,7 @@ export class WorldScene extends Phaser.Scene {
   private syncSnapshot(snapshot: WorldSnapshot | null) {
     if (!snapshot) {
       this.arena.clear();
+      this.lobbyMap?.setVisible(false);
       return;
     }
 
@@ -124,6 +134,14 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private drawArena(snapshot: WorldSnapshot) {
+    if (snapshot.phase === "lobby" && this.lobbyMap) {
+      this.arena.clear();
+      this.lobbyMap.setVisible(true);
+      this.cameras.main.setBackgroundColor("#bfe7ff");
+      return;
+    }
+
+    this.lobbyMap?.setVisible(false);
     // Determine the map boundaries. We add a visual padding of 4 units (64 pixels)
     // so that when the player reaches the map's boundary, the rendered borders are
     // further away from their position, avoiding a cramped feeling at the edges.
@@ -133,8 +151,8 @@ export class WorldScene extends Phaser.Scene {
     
     // Choose floor/border colors depending on active sabotages and game phase.
     const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
-    const baseColor = lightsOff ? 0x05070b : snapshot.phase === "lobby" ? 0x102e1c : 0x10263a;
-    const borderColor = lightsOff ? 0xf8fafc : snapshot.phase === "lobby" ? 0xf6bd60 : 0x7dd3fc;
+    const baseColor = lightsOff ? 0x05070b : snapshot.phase === "lobby" ? 0xbfe7ff : 0x10263a;
+    const borderColor = lightsOff ? 0xf8fafc : snapshot.phase === "lobby" ? 0x7dd3fc : 0x7dd3fc;
 
     // Draw the arena background and outer border boundaries with the visual padding.
     this.arena.clear();
@@ -170,7 +188,7 @@ export class WorldScene extends Phaser.Scene {
       const isGhost = player.state === "ghost";
       const isVisible = this.state.viewMode === "spectator" || player.id === localPlayerId || !isGhost;
       visual.container.setVisible(isVisible);
-visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
+      visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
       if (player.id === localPlayerId) {
         const reconciled = reconcileLocalPlayer(
@@ -180,7 +198,8 @@ visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
           snapshot.mapHalfExtent,
           snapshot.phase,
         );
-        visual.container.setPosition(reconciled.x * 16, reconciled.y * 16);
+        const resolved = this.resolveReconciledPosition(player, snapshot, reconciled.x, reconciled.y);
+        visual.container.setPosition(resolved.x * 16, resolved.y * 16);
         if (visual.lastInputFacingLeft !== null) {
           visual.facingLeft = visual.lastInputFacingLeft;
         } else {
@@ -357,7 +376,8 @@ visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
         snapshot.phase,
       );
 
-visual.container.setPosition(predicted.x * 16, predicted.y * 16);
+      const resolved = this.resolveLocalStep(visual.container.x / 16, visual.container.y / 16, predicted.x, predicted.y, snapshot.phase);
+      visual.container.setPosition(resolved.x * 16, resolved.y * 16);
       if (facing !== null) {
         visual.facingLeft = facing;
         visual.lastInputFacingLeft = facing;
@@ -373,7 +393,7 @@ visual.container.setPosition(predicted.x * 16, predicted.y * 16);
     this.session.sendInput(seq, input.x, input.y);
   }
 
-private interpolateRemotePlayers() {
+  private interpolateRemotePlayers() {
     for (const [id, visual] of this.players) {
       if (id === this.state.localPlayerId) continue;
       if (visual.snapshots.length === 0) continue;
@@ -400,6 +420,14 @@ private interpolateRemotePlayers() {
   }
 
   private updateCamera(snapshot: WorldSnapshot) {
+    if (this.state.viewMode === "spectator" && snapshot.phase === "lobby" && this.lobbyLayout) {
+      // Fit the authored lobby map instead of the old oversized placeholder arena.
+      this.cameras.main.stopFollow();
+      this.cameras.main.centerOn(0, 0);
+      this.cameras.main.setZoom(Math.max(WorldScene.LOBBY_CAMERA_ZOOM, Math.min(4.4, Math.min(this.cameras.main.width / (this.lobbyLayout.width * 16), this.cameras.main.height / (this.lobbyLayout.height * 16)) * WorldScene.LOBBY_CAMERA_ZOOM)));
+      return;
+    }
+
     const mapHalfExtent = snapshot.mapHalfExtent;
     const visualPadding = 4;
     const drawExtent = mapHalfExtent + visualPadding;
@@ -426,7 +454,9 @@ private interpolateRemotePlayers() {
       const targetHeight = 400;
       const zoomX = this.cameras.main.width / targetWidth;
       const zoomY = this.cameras.main.height / targetHeight;
-      const zoom = Math.max(zoomX, zoomY);
+      const zoom = snapshot.phase === "lobby"
+        ? Math.max(WorldScene.LOBBY_CAMERA_ZOOM, Math.max(zoomX, zoomY))
+        : Math.max(zoomX, zoomY);
 
       this.cameras.main.setZoom(zoom);
     }
@@ -449,7 +479,8 @@ private interpolateRemotePlayers() {
       strokeThickness: 4,
       align: "center",
     }).setOrigin(0.5);
-    const container = this.add.container(player.x * 16, player.z * 16, [sprite, label]);
+    const hitbox = this.add.rectangle(0, 0, 12, 12, 0xff0000, 0.3).setStrokeStyle(1, 0xff0000);
+    const container = this.add.container(player.x * 16, player.z * 16, [hitbox, sprite, label]);
     container.setDepth(10);
 
 const visual = {
@@ -469,7 +500,8 @@ const visual = {
   }
 
   private createBody(id: string) {
-    const body = this.add.rectangle(0, 0, 26, 14, 0xff5d73).setRotation(Math.PI / 8).setDepth(4);
+    // Reuse the fruit sprite so dead bodies read as a fallen kiwi instead of a placeholder shape.
+    const body = this.add.sprite(0, 0, "kiwi-fruit").setScale(WorldScene.PLAYER_BASE_SCALE * 0.9).setRotation(Math.PI / 2).setDepth(4);
     const visual = { body };
     this.bodies.set(id, visual);
     return visual;
@@ -514,6 +546,81 @@ const visual = {
     }
 
     return y < 0 ? "up" : "down";
+  }
+
+  private initializeLobbyMap() {
+    this.lobbyLayout = parseLobbyLayout(this.cache.json.get("lobby-ldtk"));
+    if (!this.lobbyLayout) {
+      return;
+    }
+
+    const textureKey = "lobby-tiles";
+    if (this.textures.exists(textureKey)) {
+      this.buildLobbyMap(textureKey);
+      return;
+    }
+
+    this.load.image(textureKey, this.lobbyLayout.tilesetPath);
+    this.load.once(Phaser.Loader.Events.COMPLETE, () => this.buildLobbyMap(textureKey));
+    this.load.start();
+  }
+
+  private buildLobbyMap(textureKey: string) {
+    if (!this.lobbyLayout || this.lobbyMap) {
+      return;
+    }
+
+    const lobbyMap = this.add.container(0, 0).setDepth(0).setVisible(false);
+    const levelWidth = this.lobbyLayout.width * this.lobbyLayout.gridSize;
+    const levelHeight = this.lobbyLayout.height * this.lobbyLayout.gridSize;
+    lobbyMap.add(this.add.rectangle(0, 0, levelWidth, levelHeight, 0xbfe7ff).setOrigin(0.5));
+
+    // Draw the LDtk-authored ground layer directly so the lobby visuals match the collision grid.
+    for (const tile of this.lobbyLayout.tiles) {
+      const image = this.add.sprite(
+        tile.px[0] - (levelWidth / 2),
+        tile.px[1] - (levelHeight / 2),
+        textureKey,
+      ).setOrigin(0, 0)
+        .setTexture(textureKey)
+        .setFrame(this.getLobbyTileFrame(tile.src[0], tile.src[1]));
+      lobbyMap.add(image);
+    }
+
+    this.lobbyMap = lobbyMap;
+  }
+
+  private getLobbyTileFrame(srcX: number, srcY: number) {
+    const frameName = `lobby-${srcX}-${srcY}`;
+    const texture = this.textures.get("lobby-tiles");
+    if (!texture.has(frameName)) {
+      texture.add(frameName, 0, srcX, srcY, this.lobbyLayout?.gridSize ?? 16, this.lobbyLayout?.gridSize ?? 16);
+    }
+    return frameName;
+  }
+
+  private resolveReconciledPosition(player: SnapshotPlayer, snapshot: WorldSnapshot, predictedX: number, predictedY: number) {
+    if (snapshot.phase !== "lobby") {
+      return { x: predictedX, y: predictedY };
+    }
+
+    let currentX = player.x;
+    let currentY = player.z;
+    for (const input of this.pendingInputs) {
+      const targetX = currentX + (input.moveX * this.session.getMoveSpeed() * input.dt);
+      const targetY = currentY + (input.moveY * this.session.getMoveSpeed() * input.dt);
+      const resolved = this.resolveLocalStep(currentX, currentY, targetX, targetY, snapshot.phase);
+      currentX = resolved.x;
+      currentY = resolved.y;
+    }
+    return { x: currentX, y: currentY };
+  }
+
+  private resolveLocalStep(currentX: number, currentY: number, targetX: number, targetY: number, phase: WorldSnapshot["phase"]) {
+    if (phase !== "lobby") {
+      return { x: targetX, y: targetY };
+    }
+    return resolveLobbyPosition(this.lobbyLayout, currentX, currentY, targetX, targetY);
   }
 
   private getPlayerTexture(color: string) {

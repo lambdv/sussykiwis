@@ -1,4 +1,4 @@
-use myserver::{start_server, Config};
+use myserver::{Config, start_server};
 
 fn load_env() {
     // Load environment variables from `.env` if present. Ignore errors.
@@ -14,5 +14,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "3000".to_string())
         .parse::<u16>()?;
 
-    start_server(Config { host, port, tick_rate: 30 }).await
+    start_server(Config {
+        host,
+        port,
+        tick_rate: 30,
+    })
+    .await
 }
