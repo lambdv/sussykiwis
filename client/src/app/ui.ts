@@ -102,7 +102,7 @@ export function createAppUi(session: ClientSession) {
 
     if (state.route === "queue") {
       modal.style.display = "flex";
-      modalTitle.textContent = state.viewMode === "spectator" ? "Joining server view..." : "Joining game...";
+      modalTitle.textContent = state.viewMode === "spectator" ? "Joining openday..." : "Joining game...";
       modalBody.textContent = state.notice;
       return;
     }

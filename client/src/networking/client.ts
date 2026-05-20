@@ -36,7 +36,7 @@ export class NetworkClient {
     return `${wsProtocol}//${base.host}${basePath}/ws`;
   }
 
-async connect(): Promise<void> {
+  async connect(): Promise<void> {
     // Reuse an active socket immediately to avoid duplicate connections.
     if (this.isConnected()) return;
 
@@ -52,6 +52,7 @@ async connect(): Promise<void> {
       this.connection.onopen = () => {
         this.connectPromise = null;
         this.reconnectAttempts = 0;
+        this.isDisconnecting = false;
         Logger.info(LOG_SCOPES.NETWORK, "CLIENT: connected to server");
         res();
       };
@@ -63,7 +64,7 @@ async connect(): Promise<void> {
         rej(new Error("Failed to connect socket"));
       };
 
-this.connection.onmessage = (event) => {
+      this.connection.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data as string) as ServerMessage;
           if (msg.type === "welcome") {
@@ -109,22 +110,59 @@ this.connection.onmessage = (event) => {
         this.connect();
       }, delay);
     }
+
+    this.isDisconnecting = false;
   }
 
-  async join(options: { name?: string; spectator?: boolean } = {}): Promise<WelcomeMessage> {
+  async join(options: { name?: string; spectator?: boolean; timeoutMs?: number } = {}): Promise<WelcomeMessage> {
     // Reuse the shared socket, then wait for the server welcome packet.
     await this.connect();
 
     return new Promise<WelcomeMessage>((resolve, reject) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        offMessage();
+        offDisconnect();
+
+        if (timeout !== null) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+      };
+
+      const settleWelcome = (value: WelcomeMessage) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      const settleError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
       const offMessage = this.onMessage((message) => {
         if (message.type !== "welcome") return;
-        offMessage();
-        resolve(message);
+        settleWelcome(message);
       });
 
+      const offDisconnect = this.onDisconnect(() => {
+        settleError(new Error("Disconnected while waiting for welcome"));
+      });
+
+      timeout = setTimeout(() => {
+        this.disconnect();
+        settleError(new Error("Join timed out"));
+      }, options.timeoutMs ?? 8000);
+
       if (!this.sendMessage({ type: "join", name: options.name, spectator: options.spectator })) {
-        offMessage();
-        reject(new Error("Failed to send join message"));
+        this.disconnect();
+        settleError(new Error("Failed to send join message"));
       }
     });
   }

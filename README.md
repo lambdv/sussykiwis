@@ -6,6 +6,7 @@ a kiwi themed among us clone multiplayer web/mobile video game for victoria uni 
 ### docker ecs machines (cloudflared tunnel)
 run docker container on ecs server user with cloudflared quick tunnel 
 ```
+systemctl --user enable --now podman.socket
 podman compose -f container/docker-compose.yml up --build
 ```
 then access the cloudflared url on any device and enjoy.

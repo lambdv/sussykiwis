@@ -43,6 +43,7 @@ export class ClientSession {
   private joinToken = 0;
   private revealTimer: number | null = null;
   private ejectionTimer: number | null = null;
+  private joinRetryTimer: number | null = null;
   private hasShownRoleReveal = false;
   private previousSubState: WorldSnapshot["subState"] | null = null;
 
@@ -69,6 +70,7 @@ export class ClientSession {
   }
 
   showMenu() {
+    this.joinToken += 1;
     this.clearTransientTimers();
     this.network.disconnect();
     this.hasShownRoleReveal = false;
@@ -89,48 +91,26 @@ export class ClientSession {
   }
 
   async joinPlayer() {
-    this.joinToken += 1;
-    const token = this.joinToken;
-    this.clearTransientTimers();
-    this.network.disconnect();
-    this.hasShownRoleReveal = false;
-    this.previousSubState = null;
-    this.patchState({
-      route: "queue",
-      viewMode: "player",
-      connected: false,
-      notice: "Joining game...",
-      localPlayerId: null,
-      localRole: null,
-      snapshot: null,
-      revealEndsAt: null,
-      ejectionMessage: null,
-      win: null,
-    });
-
-    try {
-      const welcome = await this.network.join();
-      if (token !== this.joinToken) return;
-      this.applyWelcome(welcome, "player");
-    } catch (error) {
-      if (token !== this.joinToken) return;
-      console.error("Failed to join game:", error);
-      this.patchState({ route: "menu", notice: "Failed to join game" });
-    }
+    this.startJoinLoop("player");
   }
 
   async joinSpectator() {
+    this.startJoinLoop("spectator");
+  }
+
+  private startJoinLoop(viewMode: ViewMode) {
     this.joinToken += 1;
     const token = this.joinToken;
+    this.clearJoinRetryTimer();
     this.clearTransientTimers();
     this.network.disconnect();
-    this.hasShownRoleReveal = true;
+    this.hasShownRoleReveal = viewMode === "spectator";
     this.previousSubState = null;
     this.patchState({
       route: "queue",
-      viewMode: "spectator",
+      viewMode,
       connected: false,
-      notice: "Joining server view...",
+      notice: viewMode === "spectator" ? "Joining openday..." : "Joining game...",
       localPlayerId: null,
       localRole: null,
       snapshot: null,
@@ -139,15 +119,7 @@ export class ClientSession {
       win: null,
     });
 
-    try {
-      const welcome = await this.network.join({ name: "Spectator", spectator: true });
-      if (token !== this.joinToken) return;
-      this.applyWelcome(welcome, "spectator");
-    } catch (error) {
-      if (token !== this.joinToken) return;
-      console.error("Failed to join server view:", error);
-      this.patchState({ route: "menu", notice: "Failed to join server view" });
-    }
+    void this.tryJoin(viewMode, token, 0);
   }
 
   continueFromWin() {
@@ -222,6 +194,7 @@ export class ClientSession {
   }
 
   private applyWelcome(welcome: WelcomeMessage, viewMode: ViewMode) {
+    this.clearJoinRetryTimer();
     this.patchState({
       route: "world",
       viewMode,
@@ -230,6 +203,44 @@ export class ClientSession {
       localPlayerId: welcome.observer ? null : welcome.playerId,
       localRole: null,
     });
+  }
+
+  private async tryJoin(viewMode: ViewMode, token: number, attempt: number) {
+    if (token !== this.joinToken) return;
+
+    const attemptLabel = attempt === 0 ? "" : ` (retry ${attempt})`;
+    this.patchState({
+      notice: viewMode === "spectator" ? `Joining openday...${attemptLabel}` : `Joining game...${attemptLabel}`,
+    });
+
+    try {
+      const welcome = await this.network.join(
+        viewMode === "spectator"
+          ? { name: "Spectator", spectator: true, timeoutMs: 8000 }
+          : { timeoutMs: 8000 },
+      );
+
+      if (token !== this.joinToken) return;
+      this.applyWelcome(welcome, viewMode);
+    } catch (error) {
+      if (token !== this.joinToken) return;
+
+      console.warn(viewMode === "spectator" ? "Failed to join openday" : "Failed to join game", error);
+
+      const delay = Math.min(1000 * Math.pow(2, Math.min(attempt + 1, 4)), 10000);
+      this.patchState({
+        notice:
+          viewMode === "spectator"
+            ? `Joining openday... retrying in ${Math.ceil(delay / 1000)}s`
+            : `Joining game... retrying in ${Math.ceil(delay / 1000)}s`,
+      });
+
+      this.clearJoinRetryTimer();
+      this.joinRetryTimer = window.setTimeout(() => {
+        this.joinRetryTimer = null;
+        void this.tryJoin(viewMode, token, attempt + 1);
+      }, delay);
+    }
   }
 
   private handleMessage(message: ServerMessage) {
@@ -366,6 +377,14 @@ export class ClientSession {
   private clearTransientTimers() {
     this.clearRevealTimer();
     this.clearEjectionTimer();
+    this.clearJoinRetryTimer();
+  }
+
+  private clearJoinRetryTimer() {
+    if (this.joinRetryTimer !== null) {
+      window.clearTimeout(this.joinRetryTimer);
+      this.joinRetryTimer = null;
+    }
   }
 
   private clearRevealTimer() {
