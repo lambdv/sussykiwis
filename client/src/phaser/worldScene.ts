@@ -3,7 +3,7 @@ import { PlayerInputController } from "../core/inputController";
 import {
   canLocallyMove,
   getFacingFromMovement,
-  getMapHalfExtent,
+  getMapHalfExtents,
   predictLocalPlayer,
   updateRenderTime,
   type PendingInput,
@@ -11,7 +11,7 @@ import {
 } from "../core/movement";
 import { ClientSession, type ClientSessionState } from "../core/session";
 import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
-import { parseAuthoredMap, parseLobbyLayout, resolveLobbyPosition, type AuthoredMapLayout, type LobbyLayout } from "./lobbyLdtk";
+import { parseAuthoredMap, parseLobbyLayout, resolveAuthoredPosition, resolveLobbyPosition, type AuthoredMapLayout, type LobbyLayout } from "./lobbyLdtk";
 
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
@@ -180,9 +180,9 @@ export class WorldScene extends Phaser.Scene {
     // Determine the map boundaries. We add a visual padding of 4 units (64 pixels)
     // so that when the player reaches the map's boundary, the rendered borders are
     // further away from their position, avoiding a cramped feeling at the edges.
-    const mapHalfExtent = snapshot.mapHalfExtent;
     const visualPadding = 4;
-    const drawExtent = mapHalfExtent + visualPadding;
+    const drawHalfWidth = snapshot.mapHalfExtentX + visualPadding;
+    const drawHalfHeight = snapshot.mapHalfExtentZ + visualPadding;
     
     // Choose floor/border colors depending on active sabotages and game phase.
     const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
@@ -192,9 +192,9 @@ export class WorldScene extends Phaser.Scene {
     // Draw the arena background and outer border boundaries with the visual padding.
     this.arena.clear();
     this.arena.fillStyle(baseColor, 1);
-    this.arena.fillRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
+    this.arena.fillRect(-drawHalfWidth * 16, -drawHalfHeight * 16, drawHalfWidth * 32, drawHalfHeight * 32);
     this.arena.lineStyle(6, borderColor, 1);
-    this.arena.strokeRect(-drawExtent * 16, -drawExtent * 16, drawExtent * 32, drawExtent * 32);
+    this.arena.strokeRect(-drawHalfWidth * 16, -drawHalfHeight * 16, drawHalfWidth * 32, drawHalfHeight * 32);
 
     // We do NOT set the camera bounds here. This simplifies camera following and 
     // prevents the camera from getting stuck or colliding at the top-left boundary, 
@@ -223,7 +223,7 @@ export class WorldScene extends Phaser.Scene {
         //   player,
         //   this.pendingInputs,
         //   this.session.getMoveSpeed(),
-        //   snapshot.mapHalfExtent,
+        //   getMapHalfExtents(snapshot),
         //   snapshot.phase,
         // );
         // const resolved = this.resolveReconciledPosition(player, snapshot, reconciled.x, reconciled.y);
@@ -401,7 +401,7 @@ export class WorldScene extends Phaser.Scene {
         input.y,
         dt,
         this.session.getMoveSpeed(),
-        getMapHalfExtent(snapshot),
+        getMapHalfExtents(snapshot),
         snapshot.phase,
       );
 
@@ -457,15 +457,15 @@ export class WorldScene extends Phaser.Scene {
       return;
     }
 
-    const mapHalfExtent = snapshot.mapHalfExtent;
     const visualPadding = 4;
-    const drawExtent = mapHalfExtent + visualPadding;
+    const drawHalfWidth = snapshot.mapHalfExtentX + visualPadding;
+    const drawHalfHeight = snapshot.mapHalfExtentZ + visualPadding;
 
     if (this.state.viewMode === "spectator") {
       // Keep gameplay closer so the authored map no longer looks tiny in-match.
       this.cameras.main.stopFollow();
       this.cameras.main.centerOn(0, 0);
-      this.cameras.main.setZoom(Math.max(WorldScene.IN_GAME_CAMERA_ZOOM, Math.min(3.2, 720 / (drawExtent * 32))));
+      this.cameras.main.setZoom(Math.max(WorldScene.IN_GAME_CAMERA_ZOOM, Math.min(3.2, Math.min(720 / (drawHalfWidth * 32), 720 / (drawHalfHeight * 32)))));
       return;
     }
 
@@ -660,10 +660,12 @@ const visual = {
     const levelHeight = this.matchLayout.height * this.matchLayout.gridSize;
     const background = this.add.rectangle(0, 0, levelWidth, levelHeight, 0xbfe7ff).setOrigin(0.5).setDepth(-1).setVisible(false);
     this.matchMapParts.push(background);
+    const layerCount = this.matchLayout.layers.length;
 
     // Rebuild each authored tile layer separately so roof tiles can sit above players.
     for (const [index, layer] of this.matchLayout.layers.entries()) {
-      const container = this.add.container(0, 0).setDepth(layer.identifier === "CaveRoof" ? 20 + index : index).setVisible(false);
+      // LDtk exports layers top-most first, while Phaser draws larger depths on top.
+      const container = this.add.container(0, 0).setDepth(layer.identifier === "CaveRoof" ? 20 + index : layerCount - index).setVisible(false);
       const textureKey = textureKeys.get(layer.tilesetPath);
       if (!textureKey) {
         continue;
@@ -743,9 +745,10 @@ const visual = {
   }
 
   private resolveLocalStep(currentX: number, currentY: number, targetX: number, targetY: number, phase: WorldSnapshot["phase"]) {
-    // Keep client prediction aligned with server collision in every phase.
-    void phase;
-    return resolveLobbyPosition(this.lobbyLayout, currentX, currentY, targetX, targetY);
+    // Keep client prediction aligned with the active authoritative map in every phase.
+    return phase === "lobby"
+      ? resolveLobbyPosition(this.lobbyLayout, currentX, currentY, targetX, targetY)
+      : resolveAuthoredPosition(this.matchLayout, currentX, currentY, targetX, targetY);
   }
 
   private getPlayerTexture(color: string) {

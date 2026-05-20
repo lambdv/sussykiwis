@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 use std::time::Duration;
 
-use serde::Deserialize;
+use ldtk2::Ldtk;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info};
@@ -29,6 +29,8 @@ const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
 const TIMER_TARGET_SIZE: f32 = 0.8;
 const TIMER_ROTATION_PER_TICK: f32 = 0.28;
 const LOBBY_LDTK_JSON: &str = include_str!("../../../client/public/assets/game.ldtk");
+const MATCH_LDTK_JSON: &str = include_str!("../../../client/public/assets/amongus.ldtk");
+const MATCH_PASSABLE_TILE_KEYS: &[(&str, i64, i64)] = &[("Hobbit", 48, 16), ("Hobbit", 48, 64)];
 
 pub async fn start_simulation(
     mut game_rx: mpsc::Receiver<GameCommand>,
@@ -191,40 +193,12 @@ struct EjectionState {
 }
 
 #[derive(Clone)]
-struct LobbyCollisionMap {
+struct CollisionMap {
     width: usize,
     height: usize,
     half_width: f32,
     half_height: f32,
     solid: Vec<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LdtkProject {
-    levels: Vec<LdtkLevel>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LdtkLevel {
-    px_wid: u32,
-    px_hei: u32,
-    layer_instances: Vec<LdtkLayer>,
-}
-
-#[derive(Deserialize)]
-struct LdtkLayer {
-    #[serde(rename = "__identifier")]
-    identifier: String,
-    #[serde(rename = "__cWid")]
-    width: usize,
-    #[serde(rename = "__cHei")]
-    height: usize,
-    #[serde(rename = "__gridSize")]
-    grid_size: u32,
-    #[serde(default, rename = "intGridCsv")]
-    int_grid_csv: Vec<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -249,14 +223,15 @@ pub struct World {
     tick: u64,
     tick_rate: u32,
     move_speed: f32,
-    lobby_collision: LobbyCollisionMap,
-    lobby_map_half_extent: f32,
+    lobby_collision: CollisionMap,
+    match_collision: CollisionMap,
     event_tx: broadcast::Sender<ServerEvent>,
 }
 
 impl World {
     pub fn new(event_tx: broadcast::Sender<ServerEvent>) -> Self {
         let lobby_collision = load_lobby_collision_map();
+        let match_collision = load_match_collision_map();
         Self {
             players: HashMap::new(),
             join_order: Vec::new(),
@@ -272,8 +247,8 @@ impl World {
             tick: 0,
             tick_rate: TICK_RATE,
             move_speed: MOVE_SPEED,
-            lobby_map_half_extent: lobby_collision.half_width.min(lobby_collision.half_height),
             lobby_collision,
+            match_collision,
             event_tx,
         }
     }
@@ -285,7 +260,7 @@ impl World {
         // Allow movement in pre-match lobby and active gameplay phases.
         if matches!(self.phase, GamePhase::Lobby | GamePhase::Playing) {
             let dt = 1.0 / self.tick_rate as f32;
-            let map_half_extent = self.current_map_half_extent();
+            let collision = self.current_collision().clone();
 
             // Integrate the latest input for movable player states.
             for player in self.players.values_mut() {
@@ -300,8 +275,9 @@ impl World {
                     player.z,
                     target_x,
                     target_z,
-                    map_half_extent,
-                    &self.lobby_collision,
+                    collision.half_width,
+                    collision.half_height,
+                    &collision,
                 );
             }
         }
@@ -930,7 +906,8 @@ impl World {
                 // Send player progress so pre-match UI can show waiting status.
                 joined_players: self.players.len(),
                 expected_players: MAX_PLAYERS,
-                map_half_extent: self.current_map_half_extent(),
+                map_half_extent_x: self.current_collision().half_width,
+                map_half_extent_z: self.current_collision().half_height,
                 lobby_countdown_ends_at: self
                     .lobby_countdown_ends_at_tick
                     .map(|tick| tick * 1000 / self.tick_rate as u64),
@@ -1032,9 +1009,12 @@ impl World {
         }
     }
 
-    fn current_map_half_extent(&self) -> f32 {
-        // Use the authored LDtk map extents for both lobby and active matches.
-        self.lobby_map_half_extent
+    fn current_collision(&self) -> &CollisionMap {
+        if matches!(self.phase, GamePhase::Lobby) {
+            &self.lobby_collision
+        } else {
+            &self.match_collision
+        }
     }
 
     fn try_start_match(&mut self) {
@@ -1987,25 +1967,26 @@ fn resolve_position_for_phase(
     current_z: f32,
     target_x: f32,
     target_z: f32,
-    map_half_extent: f32,
-    lobby_collision: &LobbyCollisionMap,
+    map_half_extent_x: f32,
+    map_half_extent_z: f32,
+    collision: &CollisionMap,
 ) -> (f32, f32) {
-    let clamped_target_x = target_x.clamp(-map_half_extent, map_half_extent);
-    let clamped_target_z = target_z.clamp(-map_half_extent, map_half_extent);
+    let clamped_target_x = target_x.clamp(-map_half_extent_x, map_half_extent_x);
+    let clamped_target_z = target_z.clamp(-map_half_extent_z, map_half_extent_z);
 
     // Resolve one axis at a time so players can still slide against authored LDtk walls.
     let mut next_x = current_x;
     let mut next_z = current_z;
-    if !lobby_cell_is_solid(lobby_collision, clamped_target_x, current_z) {
+    if !cell_is_solid(collision, clamped_target_x, current_z) {
         next_x = clamped_target_x;
     }
-    if !lobby_cell_is_solid(lobby_collision, next_x, clamped_target_z) {
+    if !cell_is_solid(collision, next_x, clamped_target_z) {
         next_z = clamped_target_z;
     }
     (next_x, next_z)
 }
 
-fn lobby_cell_is_solid(collision: &LobbyCollisionMap, x: f32, z: f32) -> bool {
+fn cell_is_solid(collision: &CollisionMap, x: f32, z: f32) -> bool {
     const PLAYER_HALF_EXTENT: f32 = 0.375;
 
     let min_cell_x = ((x - PLAYER_HALF_EXTENT) + collision.half_width).floor() as isize;
@@ -2032,42 +2013,95 @@ fn lobby_cell_is_solid(collision: &LobbyCollisionMap, x: f32, z: f32) -> bool {
     false
 }
 
-fn load_lobby_collision_map() -> LobbyCollisionMap {
-    let project: LdtkProject =
-        serde_json::from_str(LOBBY_LDTK_JSON).expect("lobby LDtk must deserialize");
+fn load_lobby_collision_map() -> CollisionMap {
+    load_collision_map_from_intgrid(LOBBY_LDTK_JSON, "Collisions")
+}
+
+fn load_match_collision_map() -> CollisionMap {
+    load_collision_map_from_solid_layers(MATCH_LDTK_JSON)
+}
+
+fn load_collision_map_from_intgrid(ldtk_json: &str, layer_identifier: &str) -> CollisionMap {
+    let project = Ldtk::from_str(ldtk_json).expect("LDtk must deserialize");
     let level = project
         .levels
         .into_iter()
         .next()
-        .expect("lobby LDtk must contain one level");
-    let level_width = level.px_wid;
-    let level_height = level.px_hei;
-    let collisions = level
-        .layer_instances
+        .expect("LDtk must contain one level");
+    let layers = level.layer_instances.expect("LDtk level must contain layers");
+    let collisions = layers
         .into_iter()
-        .find(|layer| layer.identifier == "Collisions")
-        .expect("lobby LDtk must contain collisions layer");
-    let width = if collisions.width > 0 {
-        collisions.width
-    } else {
-        (level_width / collisions.grid_size) as usize
-    };
-    let height = if collisions.height > 0 {
-        collisions.height
-    } else {
-        (level_height / collisions.grid_size) as usize
-    };
+        .find(|layer| layer.identifier == layer_identifier)
+        .expect("LDtk must contain requested collision layer");
+    let width = collisions.c_wid.max(0) as usize;
+    let height = collisions.c_hei.max(0) as usize;
 
-    LobbyCollisionMap {
+    CollisionMap {
         width,
         height,
         half_width: width as f32 / 2.0,
         half_height: height as f32 / 2.0,
-        solid: collisions
-            .int_grid_csv
-            .into_iter()
-            .map(|value| value != 0)
-            .collect(),
+        solid: collisions.int_grid_csv.into_iter().map(|value| value != 0).collect(),
+    }
+}
+
+fn load_collision_map_from_solid_layers(ldtk_json: &str) -> CollisionMap {
+    let project = Ldtk::from_str(ldtk_json).expect("match LDtk must deserialize");
+    let level = project
+        .levels
+        .into_iter()
+        .next()
+        .expect("match LDtk must contain one level");
+    let layers = level.layer_instances.expect("match LDtk level must contain layers");
+    let base = layers
+        .iter()
+        .find(|layer| layer.identifier == "Land")
+        .or_else(|| layers.iter().find(|layer| layer.layer_instance_type == "Tiles"))
+        .expect("match LDtk must contain at least one tile layer");
+    let width = base.c_wid.max(0) as usize;
+    let height = base.c_hei.max(0) as usize;
+    let mut solid = vec![false; width * height];
+
+    // Treat every non-floor, non-roof tile layer as authored blocking geometry.
+    for layer in layers.into_iter().filter(|layer| {
+        layer.layer_instance_type == "Tiles"
+            && layer.identifier != "Land"
+            && layer.identifier != "Ground"
+            && layer.identifier != "CaveRoof"
+    }) {
+        for tile in layer.grid_tiles {
+            let px = tile.px.get(0).copied().unwrap_or_default();
+            let py = tile.px.get(1).copied().unwrap_or_default();
+            let src_x = tile.src.get(0).copied().unwrap_or_default();
+            let src_y = tile.src.get(1).copied().unwrap_or_default();
+            if px < 0 || py < 0 {
+                continue;
+            }
+
+            if MATCH_PASSABLE_TILE_KEYS
+                .iter()
+                .any(|(layer_id, passable_x, passable_y)| {
+                    layer.identifier == *layer_id && src_x == *passable_x && src_y == *passable_y
+                })
+            {
+                continue;
+            }
+
+            let cell_x = (px / layer.grid_size) as usize;
+            let cell_y = (py / layer.grid_size) as usize;
+            if cell_x >= width || cell_y >= height {
+                continue;
+            }
+            solid[(cell_y * width) + cell_x] = true;
+        }
+    }
+
+    CollisionMap {
+        width,
+        height,
+        half_width: width as f32 / 2.0,
+        half_height: height as f32 / 2.0,
+        solid,
     }
 }
 

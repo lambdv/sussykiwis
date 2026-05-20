@@ -52,10 +52,6 @@ export function createAppUi(session: ClientSession) {
   const puzzleButton = createActionButton("Puzzle");
   const borrowButton = createActionButton("Kiwi Borrow");
   const borrowExitButton = createActionButton("Exit Borrow");
-  const borrowUpButton = createActionButton("Borrow Up");
-  const borrowDownButton = createActionButton("Borrow Down");
-  const borrowLeftButton = createActionButton("Borrow Left");
-  const borrowRightButton = createActionButton("Borrow Right");
   actions.append(
     reportButton,
     killButton,
@@ -64,10 +60,6 @@ export function createAppUi(session: ClientSession) {
     puzzleButton,
     borrowButton,
     borrowExitButton,
-    borrowUpButton,
-    borrowDownButton,
-    borrowLeftButton,
-    borrowRightButton,
   );
 
   const puzzleModal = createPuzzleModal({
@@ -173,59 +165,83 @@ export function createAppUi(session: ClientSession) {
     }
 
     actions.style.display = state.viewMode === "player" && state.route === "world" && !isLobby ? "flex" : "none";
+    const canUseKillButtons = state.localRole === "imposter";
+    const canUseBorrowButtons = Boolean(hud.canUseBorrow && hud.nearbyBorrow && !hud.activeBorrow);
+    const canExitBorrow = Boolean(hud.activeBorrow);
+
+    // Keep the core action buttons visible, but hide role-gated actions when they do not apply.
+    reportButton.style.display = "inline-flex";
     setButtonState(reportButton, hud.canReport, "Report", () => {
       if (hud.nearbyBody) {
         session.reportBody(hud.nearbyBody.id);
       }
     });
-    setButtonState(
-      killButton,
-      hud.canKill,
-      hud.killCooldownRemainingSeconds > 0 ? `Kill (${hud.killCooldownRemainingSeconds}s)` : "Kill",
-      () => {
-        if (hud.nearbyTarget) {
-          session.kill(hud.nearbyTarget.id);
-        }
-      },
-    );
-    setButtonState(lightsButton, hud.canSabotage, "Lights", () => session.sabotage("lights_off"));
-    setButtonState(grayButton, hud.canSabotage, "Gray", () => session.sabotage("gray_players"));
-    setButtonState(
-      puzzleButton,
-      Boolean(hud.canWorkPuzzle && hud.nearbyPuzzle && !hud.activePuzzle),
-      hud.activePuzzle ? "Puzzle Active" : hud.nearbyPuzzle ? `Use ${hud.nearbyPuzzle.kind}` : "Puzzle",
-      () => {
-        if (hud.nearbyPuzzle) {
-          session.startPuzzle(hud.nearbyPuzzle.id);
-        }
-      },
-    );
-    setButtonState(
-      borrowButton,
-      Boolean(hud.canUseBorrow && hud.nearbyBorrow && !hud.activeBorrow),
-      hud.activeBorrow ? "Borrow Active" : hud.nearbyBorrow ? "Enter Kiwi Borrow" : "Kiwi Borrow",
-      () => {
-        if (hud.nearbyBorrow) {
-          session.enterBorrow(hud.nearbyBorrow.id);
-        }
-      },
-    );
-    setButtonState(borrowExitButton, Boolean(hud.activeBorrow), "Exit Borrow", () => session.exitBorrow());
-    setButtonState(borrowUpButton, Boolean(hud.activeBorrow), "^", () => session.traverseBorrow("up"));
-    setButtonState(borrowDownButton, Boolean(hud.activeBorrow), "v", () => session.traverseBorrow("down"));
-    setButtonState(borrowLeftButton, Boolean(hud.activeBorrow), "<", () => session.traverseBorrow("left"));
-    setButtonState(borrowRightButton, Boolean(hud.activeBorrow), ">", () => session.traverseBorrow("right"));
+    killButton.style.display = canUseKillButtons ? "inline-flex" : "none";
+    if (canUseKillButtons) {
+      setButtonState(
+        killButton,
+        hud.canKill,
+        hud.killCooldownRemainingSeconds > 0 ? `Kill (${hud.killCooldownRemainingSeconds}s)` : "Kill",
+        () => {
+          if (hud.nearbyTarget) {
+            session.kill(hud.nearbyTarget.id);
+          }
+        },
+      );
+    }
 
-    [
-      borrowButton,
-      borrowExitButton,
-      borrowUpButton,
-      borrowDownButton,
-      borrowLeftButton,
-      borrowRightButton,
-    ].forEach((button) => {
-      button.style.display = state.viewMode === "player" && state.route === "world" && !isLobby ? "inline-flex" : "none";
-    });
+    lightsButton.style.display = canUseKillButtons ? "inline-flex" : "none";
+    if (canUseKillButtons) {
+      setButtonState(lightsButton, hud.canSabotage, "Lights", () => session.sabotage("lights_off"));
+    }
+
+    grayButton.style.display = canUseKillButtons ? "inline-flex" : "none";
+    if (canUseKillButtons) {
+      setButtonState(grayButton, hud.canSabotage, "Gray", () => session.sabotage("gray_players"));
+    }
+
+    const canUsePuzzleButton = Boolean(hud.canWorkPuzzle && hud.nearbyPuzzle && !hud.activePuzzle);
+    puzzleButton.style.display = canUsePuzzleButton ? "inline-flex" : "none";
+    if (canUsePuzzleButton) {
+      setButtonState(
+        puzzleButton,
+        true,
+        `Use ${hud.nearbyPuzzle?.kind ?? "Puzzle"}`,
+        () => {
+          if (hud.nearbyPuzzle) {
+            session.startPuzzle(hud.nearbyPuzzle.id);
+          }
+        },
+      );
+    } else {
+      puzzleButton.disabled = true;
+      puzzleButton.onclick = null;
+    }
+
+    borrowButton.style.display = canUseBorrowButtons ? "inline-flex" : "none";
+    if (canUseBorrowButtons) {
+      setButtonState(
+        borrowButton,
+        true,
+        "Enter Kiwi Borrow",
+        () => {
+          if (hud.nearbyBorrow) {
+            session.enterBorrow(hud.nearbyBorrow.id);
+          }
+        },
+      );
+    } else {
+      borrowButton.disabled = true;
+      borrowButton.onclick = null;
+    }
+
+    borrowExitButton.style.display = canExitBorrow ? "inline-flex" : "none";
+    if (canExitBorrow) {
+      setButtonState(borrowExitButton, true, "Exit Borrow", () => session.exitBorrow());
+    } else {
+      borrowExitButton.disabled = true;
+      borrowExitButton.onclick = null;
+    }
 
     const activePuzzle = state.snapshot?.puzzleStations.find((station) => station.occupiedBy === state.localPlayerId) ?? null;
     puzzleModal.update({ station: activePuzzle, player: localPlayer });

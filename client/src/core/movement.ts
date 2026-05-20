@@ -1,5 +1,10 @@
 import type { GamePhase, PlayerState, SnapshotPlayer, WorldSnapshot } from "../networking/message";
 
+export type MapHalfExtents = {
+  x: number;
+  y: number;
+};
+
 export type PendingInput = {
   seq: number;
   moveX: number;
@@ -40,12 +45,12 @@ export function getFacingFromMovement(x: number, _y: number) {
   return x < 0;
 }
 
-export function clampToPhaseBounds(x: number, y: number, mapHalfExtent: number, _phase: GamePhase) {
+export function clampToPhaseBounds(x: number, y: number, mapHalfExtents: MapHalfExtents, _phase: GamePhase) {
   // Keep client prediction inside the snapshot extents and let authored lobby collisions
   // in the scene handle the finer blocking rules.
   return {
-    x: clampToMap(x, mapHalfExtent),
-    y: clampToMap(y, mapHalfExtent),
+    x: clampToMap(x, mapHalfExtents.x),
+    y: clampToMap(y, mapHalfExtents.y),
   };
 }
 
@@ -57,7 +62,7 @@ export function reconcileLocalPlayer(
   snapshotPlayer: SnapshotPlayer,
   pendingInputs: PendingInput[],
   moveSpeed: number,
-  mapHalfExtent: number,
+  mapHalfExtents: MapHalfExtents,
   phase: GamePhase,
 ) {
   let targetX = snapshotPlayer.x;
@@ -77,7 +82,7 @@ export function reconcileLocalPlayer(
     }
   }
 
-  const clamped = clampToPhaseBounds(targetX, targetY, mapHalfExtent, phase);
+  const clamped = clampToPhaseBounds(targetX, targetY, mapHalfExtents, phase);
   return {
     x: clamped.x,
     y: clamped.y,
@@ -92,10 +97,10 @@ export function predictLocalPlayer(
   moveY: number,
   dt: number,
   moveSpeed: number,
-  mapHalfExtent: number,
+  mapHalfExtents: MapHalfExtents,
   phase: GamePhase,
 ) {
-  return clampToPhaseBounds(x + moveX * moveSpeed * dt, y + moveY * moveSpeed * dt, mapHalfExtent, phase);
+  return clampToPhaseBounds(x + moveX * moveSpeed * dt, y + moveY * moveSpeed * dt, mapHalfExtents, phase);
 }
 
 export function getRemoteRenderPosition(snapshots: RemoteSnapshot[], renderTime: number) {
@@ -131,8 +136,11 @@ export function getRemoteRenderPosition(snapshots: RemoteSnapshot[], renderTime:
   };
 }
 
-export function getMapHalfExtent(snapshot: WorldSnapshot | null) {
-  return snapshot?.mapHalfExtent ?? 30;
+export function getMapHalfExtents(snapshot: WorldSnapshot | null): MapHalfExtents {
+  return {
+    x: snapshot?.mapHalfExtentX ?? 30,
+    y: snapshot?.mapHalfExtentZ ?? 30,
+  };
 }
 
 function extrapolateSnapshot(snapshots: RemoteSnapshot[], renderTime: number) {

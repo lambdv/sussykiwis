@@ -76,6 +76,7 @@ export type AuthoredMapLayout = {
   halfHeight: number;
   layers: AuthoredTileLayer[];
   hideZones: HideLayerZone[];
+  solid: boolean[];
 };
 
 export type LobbyLayout = {
@@ -90,6 +91,8 @@ export type LobbyLayout = {
 };
 
 const PLAYER_HALF_EXTENT = 0.375;
+const NON_SOLID_LAYER_IDS = new Set(["Land", "Ground", "CaveRoof"]);
+const PASSABLE_TILE_KEYS = new Set(["Hobbit:48,16", "Hobbit:48,64"]);
 
 export function parseAuthoredMap(raw: unknown): AuthoredMapLayout | null {
   const project = raw as LdtkProject | null;
@@ -119,11 +122,31 @@ export function parseAuthoredMap(raw: unknown): AuthoredMapLayout | null {
 
   const levelWidth = width * gridSize;
   const levelHeight = height * gridSize;
+  const solid = new Array<boolean>(width * height).fill(false);
   const parsedLayers = tileLayers.flatMap((layer) => {
     const identifier = layer.__identifier;
     const tilesetPath = layer.__tilesetRelPath;
     if (!identifier || !tilesetPath) {
       return [];
+    }
+
+    if (!NON_SOLID_LAYER_IDS.has(identifier)) {
+      for (const tile of layer.gridTiles ?? []) {
+        if (!tile.px || !tile.src) {
+          continue;
+        }
+
+        if (PASSABLE_TILE_KEYS.has(`${identifier}:${tile.src[0]},${tile.src[1]}`)) {
+          continue;
+        }
+
+        const cellX = Math.floor(tile.px[0] / gridSize);
+        const cellY = Math.floor(tile.px[1] / gridSize);
+        if (cellX < 0 || cellY < 0 || cellX >= width || cellY >= height) {
+          continue;
+        }
+        solid[(cellY * width) + cellX] = true;
+      }
     }
 
     return [{
@@ -171,6 +194,7 @@ export function parseAuthoredMap(raw: unknown): AuthoredMapLayout | null {
     halfHeight: height / 2,
     layers: parsedLayers,
     hideZones,
+    solid,
   };
 }
 
@@ -217,7 +241,24 @@ export function resolveLobbyPosition(layout: LobbyLayout | null, currentX: numbe
   return { x: nextX, y: nextY };
 }
 
-function hitsSolidCells(layout: LobbyLayout, centerX: number, centerY: number) {
+export function resolveAuthoredPosition(layout: AuthoredMapLayout | null, currentX: number, currentY: number, targetX: number, targetY: number) {
+  if (!layout) {
+    return { x: targetX, y: targetY };
+  }
+
+  // Resolve one axis at a time so client prediction matches server wall sliding.
+  let nextX = currentX;
+  let nextY = currentY;
+  if (!hitsSolidCells(layout, targetX, currentY)) {
+    nextX = targetX;
+  }
+  if (!hitsSolidCells(layout, nextX, targetY)) {
+    nextY = targetY;
+  }
+  return { x: nextX, y: nextY };
+}
+
+function hitsSolidCells(layout: Pick<LobbyLayout, "halfWidth" | "halfHeight" | "width" | "height" | "solid">, centerX: number, centerY: number) {
   const minCellX = Math.floor((centerX - PLAYER_HALF_EXTENT) + layout.halfWidth);
   const maxCellX = Math.floor((centerX + PLAYER_HALF_EXTENT) + layout.halfWidth - 0.000001);
   const minCellY = Math.floor((centerY - PLAYER_HALF_EXTENT) + layout.halfHeight);

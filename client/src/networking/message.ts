@@ -139,7 +139,8 @@ export type WorldSnapshot = {
   subState: GameSubState;
   joinedPlayers: number;
   expectedPlayers: number;
-  mapHalfExtent: number;
+  mapHalfExtentX: number;
+  mapHalfExtentZ: number;
   lobbyCountdownEndsAt: number | null;
   players: SnapshotPlayer[];
   deadBodies: SnapshotDeadBody[];
