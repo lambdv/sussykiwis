@@ -18,6 +18,7 @@ WORKDIR /work
 # Build the authoritative Rust server in release mode.
 COPY server/Cargo.toml server/Cargo.lock ./server/
 COPY server/src ./server/src
+COPY client/public/assets ./client/public/assets
 RUN cargo build --release --manifest-path server/Cargo.toml
 
 
