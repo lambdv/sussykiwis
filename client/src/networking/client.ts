@@ -16,6 +16,7 @@ export class NetworkClient {
   private maxReconnectAttempts = Number.POSITIVE_INFINITY;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isDisconnecting = false;
+  private disconnectHandled = false;
   private nextInputSeqValue = 0;
   private moveSpeed = DEFAULT_MOVE_SPEED;
 
@@ -51,6 +52,7 @@ export class NetworkClient {
     // Open websocket and resolve once the connection is accepted.
     this.connectPromise = new Promise<void>((res, rej) => {
       this.connection = new WebSocket(this.getUrl());
+      this.disconnectHandled = false;
 
       this.connection.onopen = () => {
         this.connectPromise = null;
@@ -61,9 +63,9 @@ export class NetworkClient {
       };
 
       this.connection.onerror = () => {
+        Logger.error(LOG_SCOPES.NETWORK, "CLIENT: websocket error");
         this.connectPromise = null;
         this.handleDisconnect(false);
-        Logger.error(LOG_SCOPES.NETWORK, "CLIENT: websocket error");
         rej(new Error("Failed to connect socket"));
       };
 
@@ -98,6 +100,12 @@ export class NetworkClient {
   }
 
   private handleDisconnect(wasIntentional: boolean) {
+    if (this.disconnectHandled) {
+      return;
+    }
+
+    this.disconnectHandled = true;
+
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
