@@ -63,7 +63,7 @@ add_hosts_entry() {
 }
 
 get_tunnel_url() {
-  for _ in $(seq 1 45); do
+  for _ in $(seq 1 90); do
     local logs
     logs="$(docker logs "$TUNNEL_CONTAINER" 2>&1 || true)"
 
@@ -78,6 +78,8 @@ get_tunnel_url() {
     sleep 1
   done
 
+  printf 'No trycloudflare URL found. Recent cloudflared logs:\n' >&2
+  docker logs "$TUNNEL_CONTAINER" 2>&1 | tail -80 >&2 || true
   return 1
 }
 
@@ -213,7 +215,7 @@ trap on_exit EXIT
 remove_hosts_entry_for_tag
 cleanup_stack
 
-compose up --build --force-recreate --remove-orphans -d app "$@"
+compose up --build --force-recreate --remove-orphans -d app
 
 if ! wait_local_app_ready; then
   printf 'Local app did not become healthy at http://localhost:8080/healthz\n'
@@ -230,10 +232,10 @@ for attempt in $(seq 1 6); do
 done
 
 printf '\n'
-if [ -n "$tunnel_url" ]; then
+if [ -n "${tunnel_url:-}" ]; then
   printf 'Tunnel ready: %s\n' "$tunnel_url"
 else
-  printf 'Failed to validate a quick tunnel after multiple attempts.\n'
+  printf 'Tunnel was not ready.\n'
 fi
 printf 'Local fallback: http://localhost:8080\n\n'
 
