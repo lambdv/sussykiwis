@@ -29,6 +29,8 @@ WORKDIR /app
 # Copy the server binary and built client into the runtime image.
 COPY --from=server-build /work/server/target/release/myserver /app/myserver
 COPY --from=client-build /work/client/dist /usr/share/nginx/html
+# Ensure all static assets are world-readable for the nginx worker.
+RUN chmod -R a+rX /usr/share/nginx/html
 
 # Nginx fronts the Rust server and serves the SPA assets.
 COPY container/nginx.conf /etc/nginx/nginx.conf
