@@ -8,11 +8,13 @@ run docker container on ecs server user with cloudflared quick tunnel
 ```
 systemctl --user enable --now podman.socket
 podman compose -f container/docker-compose.yml up --build
+# or
+docker compose -f container/docker-compose.yml up --build
 ```
 then access the cloudflared url on any device and enjoy.
 
 ### ssh dev test on ecs machines (ssh port forwarding)
-unning server on an ecs server user and then player machine sshs into that machine and port forwards
+using server on an ecs server user and then player machine sshs into that machine and port forwards
 
 ssh into ecs machine and start the server (through entry jump proxy)
 ```bash

@@ -5,6 +5,7 @@ import {
   getFacingFromMovement,
   getMapHalfExtents,
   predictLocalPlayer,
+  pruneProcessedInputs,
   updateRenderTime,
   type PendingInput,
   type RemoteSnapshot,
@@ -12,8 +13,6 @@ import {
 import { ClientSession, type ClientSessionState } from "../core/session";
 import type { PuzzleKind, SnapshotDeadBody, SnapshotPlayer, WorldSnapshot } from "../networking/message";
 import { parseAuthoredMap, parseLobbyLayout, resolveAuthoredPosition, resolveLobbyPosition, type AuthoredMapLayout, type LobbyLayout } from "./lobbyLdtk";
-import { reconcileLocalPlayer } from "../core/movement";
-
 type PlayerVisual = {
   container: Phaser.GameObjects.Container;
   sprite: Phaser.GameObjects.Sprite;
@@ -219,16 +218,15 @@ export class WorldScene extends Phaser.Scene {
       visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
       if (player.id === localPlayerId) {
-        const reconciled = reconcileLocalPlayer(
-          player,
-          this.pendingInputs,
-          this.session.getMoveSpeed(),
-          getMapHalfExtents(snapshot),
-          snapshot.phase,
-        );
-        // Snap the local player back to the authoritative state, then reapply only still-pending input.
-        visual.container.setPosition(reconciled.x * 16, reconciled.y * 16);
-        visual.facingLeft = visual.lastInputFacingLeft ?? reconciled.facingLeft;
+        // Drop server-acked inputs, but keep rendering from local prediction while movement is allowed.
+        pruneProcessedInputs(this.pendingInputs, player.lastProcessedSeq);
+        if (!canLocallyMove(snapshot.phase, player.state) || player.currentBorrowId !== null) {
+          visual.container.setPosition(player.x * 16, player.z * 16);
+          visual.isMoving = false;
+        }
+        visual.facingLeft = this.pendingInputs.length > 0 && visual.lastInputFacingLeft !== null
+          ? visual.lastInputFacingLeft
+          : player.facingLeft;
       } else {
         visual.snapshots.push({
           time: snapshot.serverTime,

@@ -20,9 +20,12 @@ export class NetworkClient {
   private moveSpeed = DEFAULT_MOVE_SPEED;
 
   private getUrl(): string {
-    // Prefer an explicit server URI in dev, otherwise use the current site origin.
-    const env = (import.meta as { env?: Record<string, string> }).env;
-    const serverUri = env?.VITE_SERVER_URI ?? env?.SERVER_URI;
+    // Only honor the explicit server URI in local Vite dev.
+    const env = (import.meta as { env?: Record<string, unknown> }).env;
+    const isDev = env?.DEV === true;
+    const serverUri = isDev
+      ? ((env?.VITE_SERVER_URI ?? env?.SERVER_URI) as string | undefined)
+      : undefined;
     const base = serverUri
       ? new URL(serverUri)
       : new URL("/api/", window.location.origin);

@@ -31,6 +31,17 @@ export class App {
       banner: false,
     });
 
+    // Resume web audio on first user gesture so mobile/Chrome audio can start.
+    const unlockAudio = () => {
+      const sound = this.game.sound as { context?: AudioContext; unlock?: () => void } | undefined;
+      sound?.unlock?.();
+      void sound?.context?.resume()?.catch(() => {});
+    };
+
+    window.addEventListener("pointerdown", unlockAudio, { once: true, passive: true });
+    window.addEventListener("keydown", unlockAudio, { once: true });
+    window.addEventListener("touchstart", unlockAudio, { once: true, passive: true });
+
     this.ui = createAppUi(this.session);
 
     if (initialRoute === "openday") {

@@ -33,7 +33,8 @@ COPY --from=client-build /work/client/dist /usr/share/nginx/html
 # Nginx fronts the Rust server and serves the SPA assets.
 COPY container/nginx.conf /etc/nginx/nginx.conf
 COPY container/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Normalize Windows line endings so the shell can exec the script in Linux.
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Rust listens internally on 3000; nginx is the public port in-container.
 ENV PORT=3000

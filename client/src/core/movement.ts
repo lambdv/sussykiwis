@@ -90,6 +90,12 @@ export function reconcileLocalPlayer(
   };
 }
 
+export function pruneProcessedInputs(pendingInputs: PendingInput[], lastProcessedSeq: number) {
+  while (pendingInputs.length > 0 && pendingInputs[0].seq <= lastProcessedSeq) {
+    pendingInputs.shift();
+  }
+}
+
 export function predictLocalPlayer(
   x: number,
   y: number,

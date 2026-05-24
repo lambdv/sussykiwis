@@ -5,11 +5,12 @@ services:
       dockerfile: container/Dockerfile
     container_name: kiwi-app
     environment:
-      # Keep the Rust server private behind nginx inside the same container.
+      # Bind the Rust server to all interfaces so the host can reach port 3000.
       PORT: "3000"
-      HOST: "127.0.0.1"
+      HOST: "0.0.0.0"
     ports:
       - "8080:80"
+      - "3000:3000"
 
   cloudflared:
     image: cloudflare/cloudflared:latest
