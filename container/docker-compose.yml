@@ -5,17 +5,15 @@ services:
       dockerfile: container/Dockerfile
     container_name: kiwi-app
     environment:
-      # Bind the Rust server to all interfaces so the host can reach port 3000.
       PORT: "3000"
-      HOST: "0.0.0.0"
     ports:
       - "8080:80"
-      - "3000:3000"
+    restart: "no"
 
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: kiwi-cloudflared
     depends_on:
       - app
-    # Use a temporary public URL for quick ECS/mobile testing.
-    command: tunnel --protocol http2 --url http://app:80
+    command: tunnel --no-autoupdate --protocol http2 --loglevel info --url http://app:80
+    restart: "no"

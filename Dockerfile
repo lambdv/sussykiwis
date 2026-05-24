@@ -17,7 +17,7 @@ ENV VITE_SERVER_URI=http://localhost/api/
 RUN cd client && bun run build
 
 
-FROM rust:1.87-slim AS server-build
+FROM rust:1.88-slim AS server-build
 
 WORKDIR /work
 

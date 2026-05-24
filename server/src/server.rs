@@ -91,14 +91,7 @@ pub fn get_app_router(state: ServerContext) -> axum::Router {
         .route("/ws", any(ws_handler))
         .route(
             "/health",
-            get(|| async {
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "message": "healty"
-                    })),
-                )
-            }),
+            get(|| async { (StatusCode::OK, "ok") }),
         )
         .route(
             "/ping",

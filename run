@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$ROOT_DIR/container/docker-compose.yml"
+PROJECT_NAME="kiwi-dev"
+APP_CONTAINER="kiwi-app"
+TUNNEL_CONTAINER="kiwi-cloudflared"
+HOSTS_TAG="# kiwi-dev-cloudflared"
+
+compose() {
+  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+cleanup_stack() {
+  printf '\nCleaning up old app/tunnel containers...\n'
+
+  compose down --remove-orphans --timeout 2 >/dev/null 2>&1 || true
+
+  local ids
+  ids="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT_NAME" 2>/dev/null || true)"
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086
+    docker rm -f $ids >/dev/null 2>&1 || true
+  fi
+
+  docker rm -f "$TUNNEL_CONTAINER" "$APP_CONTAINER" >/dev/null 2>&1 || true
+}
+
+is_root() {
+  [ "$(id -u)" -eq 0 ]
+}
+
+remove_hosts_entry_for_tag() {
+  is_root || return 0
+
+  local hosts_file="/etc/hosts"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  if grep -vF "$HOSTS_TAG" "$hosts_file" >"$tmp_file" 2>/dev/null; then
+    cat "$tmp_file" >"$hosts_file" 2>/dev/null || true
+  fi
+
+  rm -f "$tmp_file"
+}
+
+add_hosts_entry() {
+  local host_name="$1"
+  local ip="$2"
+
+  if ! is_root; then
+    printf 'Tip: run this as root if you want to pin the hostname in /etc/hosts.\n'
+    return 0
+  fi
+
+  remove_hosts_entry_for_tag
+  printf '%s %s %s\n' "$ip" "$host_name" "$HOSTS_TAG" >>/etc/hosts
+
+  command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches >/dev/null 2>&1 || true
+  command -v systemd-resolve >/dev/null 2>&1 && systemd-resolve --flush-caches >/dev/null 2>&1 || true
+}
+
+get_tunnel_url() {
+  for _ in $(seq 1 45); do
+    local logs
+    logs="$(docker logs "$TUNNEL_CONTAINER" 2>&1 || true)"
+
+    local url
+    url="$(printf '%s\n' "$logs" | grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -n 1 || true)"
+
+    if [ -n "$url" ]; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  return 1
+}
+
+wait_tunnel_registered() {
+  for _ in $(seq 1 45); do
+    local logs
+    logs="$(docker logs "$TUNNEL_CONTAINER" 2>&1 || true)"
+
+    if printf '%s\n' "$logs" | grep -q 'Registered tunnel connection'; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  return 1
+}
+
+wait_local_app_ready() {
+  for _ in $(seq 1 30); do
+    local status
+    status="$(curl --silent --show-error --connect-timeout 2 --max-time 4 --output /dev/null --write-out '%{http_code}' http://localhost:8080/healthz 2>/dev/null || true)"
+
+    if [ "$status" = "200" ]; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  return 1
+}
+
+resolve_public_a_record() {
+  local tunnel_url="$1"
+  local timeout_seconds="${2:-45}"
+
+  [ -n "$tunnel_url" ] || return 1
+  command -v nslookup >/dev/null 2>&1 || return 1
+
+  local host_name
+  host_name="${tunnel_url#https://}"
+  host_name="${host_name%/}"
+
+  local deadline
+  deadline=$((SECONDS + timeout_seconds))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    for server in 1.1.1.1 8.8.8.8; do
+      local ip
+      ip="$(nslookup -type=A "$host_name" "$server" 2>/dev/null | awk '/^Address: / && $2 !~ /#/ { print $2; exit }' || true)"
+
+      if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+      fi
+    done
+
+    printf 'Waiting for public DNS for %s...\n' "$host_name"
+    sleep 2
+  done
+
+  return 1
+}
+
+test_tunnel_via_resolved_ip() {
+  local tunnel_url="$1"
+  local ip="$2"
+
+  [ -n "$tunnel_url" ] || return 1
+  [ -n "$ip" ] || return 1
+
+  local host_name
+  host_name="${tunnel_url#https://}"
+  host_name="${host_name%/}"
+
+  local status
+  status="$(curl --silent --show-error --location --connect-timeout 5 --max-time 10 --output /dev/null --write-out '%{http_code}' --resolve "${host_name}:443:${ip}" "https://${host_name}/healthz" 2>/dev/null || true)"
+  [ "$status" = "200" ]
+}
+
+start_fresh_tunnel_attempt() {
+  local attempt="$1"
+
+  printf '\nStarting quick tunnel attempt %s...\n' "$attempt"
+
+  docker rm -f "$TUNNEL_CONTAINER" >/dev/null 2>&1 || true
+  compose up --force-recreate --no-deps -d cloudflared >/dev/null
+
+  local tunnel_url
+  tunnel_url="$(get_tunnel_url || true)"
+  if [ -z "$tunnel_url" ]; then
+    printf 'No trycloudflare URL appeared.\n'
+    return 1
+  fi
+
+  printf 'Tunnel URL found: %s\n' "$tunnel_url"
+
+  if ! wait_tunnel_registered; then
+    printf 'Tunnel URL appeared, but cloudflared did not register a connection.\n'
+    return 1
+  fi
+
+  local public_ip
+  public_ip="$(resolve_public_a_record "$tunnel_url" 45 || true)"
+  if [ -z "$public_ip" ]; then
+    printf 'Could not resolve the hostname through public DNS after waiting, so this tunnel is not trusted yet.\n'
+    return 1
+  fi
+
+  printf 'Public DNS resolved to: %s\n' "$public_ip"
+
+  if ! test_tunnel_via_resolved_ip "$tunnel_url" "$public_ip"; then
+    printf 'Public tunnel check failed for /healthz.\n'
+    return 1
+  fi
+
+  add_hosts_entry "${tunnel_url#https://}" "$public_ip"
+  printf '%s\n' "$tunnel_url"
+}
+
+on_exit() {
+  local code=$?
+  remove_hosts_entry_for_tag
+  cleanup_stack
+  exit "$code"
+}
+
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap on_exit EXIT
+
+remove_hosts_entry_for_tag
+cleanup_stack
+
+compose up --build --force-recreate --remove-orphans -d app "$@"
+
+if ! wait_local_app_ready; then
+  printf 'Local app did not become healthy at http://localhost:8080/healthz\n'
+  exit 1
+fi
+
+tunnel_url=""
+for attempt in $(seq 1 6); do
+  if tunnel_url="$(start_fresh_tunnel_attempt "$attempt" || true)"; then
+    if [ -n "$tunnel_url" ]; then
+      break
+    fi
+  fi
+done
+
+printf '\n'
+if [ -n "$tunnel_url" ]; then
+  printf 'Tunnel ready: %s\n' "$tunnel_url"
+else
+  printf 'Failed to validate a quick tunnel after multiple attempts.\n'
+fi
+printf 'Local fallback: http://localhost:8080\n\n'
+
+compose logs -f
