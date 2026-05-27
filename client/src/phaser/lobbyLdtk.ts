@@ -91,7 +91,7 @@ export type LobbyLayout = {
 };
 
 const PLAYER_HALF_EXTENT = 0.375;
-const NON_SOLID_LAYER_IDS = new Set(["Land", "Ground", "CaveRoof"]);
+const NON_SOLID_LAYER_IDS = new Set(["Land", "Ground", "CaveRoof", "Trees"]);
 const PASSABLE_TILE_KEYS = new Set(["Hobbit:48,16", "Hobbit:48,64"]);
 
 export function parseAuthoredMap(raw: unknown): AuthoredMapLayout | null {

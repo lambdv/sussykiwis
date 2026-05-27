@@ -1,7 +1,7 @@
 import type { PuzzleProjectionState } from "../../networking/message";
 
-const kiwiBeakImage = new Image();
-kiwiBeakImage.src = "/assets/2d/kiwiBeak.png";
+const spinnerImage = new Image();
+spinnerImage.src = "/assets/2d/spinner.png";
 
 const TIMER_ROTATION_PER_TICK = 0.28;
 const TICK_RATE = 20;
@@ -76,17 +76,29 @@ export function drawTimerPuzzleScene(
   context.arc(centerX, centerY, radius, projection.targetStart - Math.PI / 2, projection.targetStart + projection.targetSize - Math.PI / 2);
   context.stroke();
 
+  // Draw the full spinner art so the puzzle reads like the in-world station.
   context.save();
   context.translate(centerX, centerY);
   context.rotate(dialAngle - Math.PI / 2);
-  const tileSize = radius * 0.98;
-  if (kiwiBeakImage.complete && kiwiBeakImage.naturalWidth > 0) {
-    context.scale(-1, 1);
-    context.drawImage(kiwiBeakImage, -tileSize / 2, -tileSize / 2, tileSize, tileSize);
+  const spinnerSize = radius * 1.85;
+  if (spinnerImage.complete && spinnerImage.naturalWidth > 0) {
+    context.drawImage(spinnerImage, -spinnerSize / 2, -spinnerSize / 2, spinnerSize, spinnerSize);
   } else {
     context.fillStyle = "#f472b6";
-    context.fillRect(-tileSize / 2, -tileSize / 2, tileSize, tileSize);
+    context.beginPath();
+    context.arc(0, 0, radius * 0.72, 0, Math.PI * 2);
+    context.fill();
   }
+
+  // Keep the break visible even if the source art is subtle.
+  context.fillStyle = "#fb7185";
+  context.beginPath();
+  context.moveTo(radius * 0.12, -radius * 0.78);
+  context.lineTo(radius * 0.36, -radius * 0.55);
+  context.lineTo(radius * 0.18, -radius * 0.42);
+  context.lineTo(-radius * 0.02, -radius * 0.68);
+  context.closePath();
+  context.fill();
   context.restore();
 
   context.fillStyle = "#f8fafc";
@@ -96,7 +108,7 @@ export function drawTimerPuzzleScene(
 
   context.fillStyle = "#cbd5e1";
   context.font = `${Math.round(width * 0.038)}px Arial`;
-  context.fillText("Tap when the beak tile reaches green", centerX, height * 0.88);
+  context.fillText("Tap when the break reaches green", centerX, height * 0.88);
 }
 
 function drawPuzzleSyncMessage(

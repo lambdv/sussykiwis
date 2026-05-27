@@ -51,6 +51,8 @@ export class WorldScene extends Phaser.Scene {
   private static readonly PLAYER_BASE_SCALE = 0.05;
   private static readonly LOBBY_CAMERA_ZOOM = 4.5;
   private static readonly IN_GAME_CAMERA_ZOOM = 2.4;
+  private static readonly NORMAL_VISION_RADIUS = 16 * 8;
+  private static readonly LIGHTS_OFF_VISION_RADIUS = 16 * 3.5;
   private session: ClientSession;
   private unsubscribe: (() => void) | null = null;
   private inputController: PlayerInputController | null = null;
@@ -70,6 +72,8 @@ export class WorldScene extends Phaser.Scene {
   private matchLayout: AuthoredMapLayout | null = null;
   private matchMapParts: Array<Phaser.GameObjects.Container | Phaser.GameObjects.Rectangle> = [];
   private matchLayers = new Map<string, Phaser.GameObjects.Container>();
+  private visionOverlay: Phaser.GameObjects.Rectangle | null = null;
+  private visionMaskShape: Phaser.GameObjects.Graphics | null = null;
 
   constructor(session: ClientSession) {
     super("world");
@@ -81,6 +85,7 @@ export class WorldScene extends Phaser.Scene {
     // Keep a single top-down scene alive while overlays swap around it.
     this.cameras.main.setBackgroundColor("#bfe7ff");
     this.arena = this.add.graphics();
+    this.initializeVisionOverlay();
     this.initializeLobbyMap();
     this.initializeMatchMap();
     this.inputController = new PlayerInputController();
@@ -103,6 +108,11 @@ export class WorldScene extends Phaser.Scene {
       }
       this.matchMapParts = [];
       this.matchLayers.clear();
+      this.scale.off(Phaser.Scale.Events.RESIZE, this.handleResize, this);
+      this.visionOverlay?.destroy();
+      this.visionMaskShape?.destroy();
+      this.visionOverlay = null;
+      this.visionMaskShape = null;
       this.players.clear();
       this.bodies.clear();
       this.puzzles.clear();
@@ -134,6 +144,7 @@ export class WorldScene extends Phaser.Scene {
     this.interpolateRemotePlayers();
     this.updatePlayerMotion(delta / 1000);
     this.updateCamera(snapshot);
+    this.updateVisionOverlay(snapshot);
   }
 
   private syncSnapshot(snapshot: WorldSnapshot | null) {
@@ -141,6 +152,8 @@ export class WorldScene extends Phaser.Scene {
       this.arena.clear();
       this.lobbyMap?.setVisible(false);
       this.setMatchMapVisible(false);
+      this.visionOverlay?.setVisible(false);
+      this.visionMaskShape?.clear();
       return;
     }
 
@@ -162,9 +175,8 @@ export class WorldScene extends Phaser.Scene {
       this.arena.clear();
       lobbyMap.setVisible(true);
       this.setMatchMapVisible(false);
-      const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
-      lobbyMap.setAlpha(lightsOff ? 0.35 : 1);
-      this.cameras.main.setBackgroundColor(lightsOff ? "#05070b" : "#bfe7ff");
+      lobbyMap.setAlpha(1);
+      this.cameras.main.setBackgroundColor("#bfe7ff");
       return;
     }
 
@@ -173,9 +185,9 @@ export class WorldScene extends Phaser.Scene {
       this.arena.clear();
       this.lobbyMap?.setVisible(false);
       this.setMatchMapVisible(true);
-      this.setMatchMapAlpha(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? 0.35 : 0.82);
+      this.setMatchMapAlpha(0.82);
       this.updateMatchRoofVisibility();
-      this.cameras.main.setBackgroundColor(snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off") ? "#05070b" : "#bfe7ff");
+      this.cameras.main.setBackgroundColor("#bfe7ff");
       return;
     }
 
@@ -190,9 +202,8 @@ export class WorldScene extends Phaser.Scene {
     const drawHalfWidth = snapshot.mapHalfExtentX + visualPadding;
     const drawHalfHeight = snapshot.mapHalfExtentZ + visualPadding;
     
-    // Choose floor/border colors depending on active sabotages and game phase.
-    const lightsOff = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
-    const baseColor = lightsOff ? 0x05070b : 0x10263a;
+    // Keep fallback arena colors stable and let the vision overlay handle darkness.
+    const baseColor = 0x10263a;
     const borderColor = 0x7dd3fc;
 
     // Draw the arena background and outer border boundaries with the visual padding.
@@ -211,6 +222,11 @@ export class WorldScene extends Phaser.Scene {
     const localPlayerId = this.state.localPlayerId;
     const liveIds = new Set<string>();
     const grayPlayers = snapshot.activeSabotages.some((sabotage) => sabotage.kind === "gray_players");
+    const localPlayer = localPlayerId
+      ? snapshot.players.find((player) => player.id === localPlayerId) ?? null
+      : null;
+    const localHasFullVision = this.hasFullVision(snapshot, localPlayer);
+    const visionRadiusSq = this.getVisionRadius(snapshot) ** 2;
 
     for (const player of snapshot.players) {
       liveIds.add(player.id);
@@ -219,7 +235,12 @@ export class WorldScene extends Phaser.Scene {
       visual.label.setColor(this.state.localRole === "imposter" && player.role === "imposter" ? "#ff5d73" : "#f8fafc");
 
       const isGhost = player.state === "ghost";
-      const isVisible = this.state.viewMode === "spectator" || player.id === localPlayerId || !isGhost;
+      const isVisibleByVision = localHasFullVision
+        || !localPlayer
+        || player.id === localPlayerId
+        || distanceSq(localPlayer.x, localPlayer.z, player.x, player.z) <= visionRadiusSq;
+      const isVisible = (this.state.viewMode === "spectator" || player.id === localPlayerId || !isGhost)
+        && isVisibleByVision;
       visual.container.setVisible(isVisible);
       visual.container.setAlpha(player.state === "dead" ? 0.35 : isGhost ? 0.6 : 1);
 
@@ -560,6 +581,77 @@ const visual = {
     return visual;
   }
 
+  private initializeVisionOverlay() {
+    // Keep the darkness effect camera-fixed so only the local view is masked.
+    this.visionOverlay = this.add.rectangle(0, 0, this.scale.width, this.scale.height, 0x02040a, 0.84)
+      .setOrigin(0)
+      .setScrollFactor(0)
+      .setDepth(100)
+      .setVisible(false);
+    this.visionMaskShape = this.add.graphics().setScrollFactor(0).setVisible(false);
+    const mask = this.visionMaskShape.createGeometryMask();
+    mask.setInvertAlpha();
+    this.visionOverlay.setMask(mask);
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.handleResize, this);
+    this.handleResize({ width: this.scale.width, height: this.scale.height });
+  }
+
+  private handleResize(gameSize: { width: number; height: number }) {
+    if (!this.visionOverlay) {
+      return;
+    }
+
+    this.visionOverlay.setSize(gameSize.width, gameSize.height);
+    this.visionOverlay.setDisplaySize(gameSize.width, gameSize.height);
+  }
+
+  private updateVisionOverlay(snapshot: WorldSnapshot) {
+    const overlay = this.visionOverlay;
+    const maskShape = this.visionMaskShape;
+    if (!overlay || !maskShape) {
+      return;
+    }
+
+    const localPlayerId = this.state.localPlayerId;
+    const localPlayer = localPlayerId
+      ? snapshot.players.find((player) => player.id === localPlayerId) ?? null
+      : null;
+    const localVisual = localPlayerId ? this.players.get(localPlayerId) ?? null : null;
+    const showRingVision = this.isLightsOff(snapshot) && !this.hasFullVision(snapshot, localPlayer) && localVisual;
+    overlay.setVisible(Boolean(showRingVision));
+    maskShape.clear();
+
+    if (!showRingVision || !localVisual) {
+      return;
+    }
+
+    const worldView = this.cameras.main.worldView;
+    const zoom = this.cameras.main.zoom;
+    const radius = this.getVisionRadius(snapshot) * zoom;
+    const screenX = (localVisual.container.x - worldView.x) * zoom;
+    const screenY = (localVisual.container.y - worldView.y) * zoom;
+    maskShape.fillStyle(0xffffff, 1);
+    maskShape.fillCircle(screenX, screenY, radius);
+  }
+
+  private hasFullVision(snapshot: WorldSnapshot, localPlayer: SnapshotPlayer | null) {
+    return this.state.viewMode === "spectator"
+      || this.state.localRole === "imposter"
+      || snapshot.phase !== "playing"
+      || !localPlayer
+      || localPlayer.state !== "alive";
+  }
+
+  private getVisionRadius(snapshot: WorldSnapshot) {
+    return this.isLightsOff(snapshot)
+      ? WorldScene.LIGHTS_OFF_VISION_RADIUS
+      : WorldScene.NORMAL_VISION_RADIUS;
+  }
+
+  private isLightsOff(snapshot: WorldSnapshot) {
+    return snapshot.activeSabotages.some((sabotage) => sabotage.kind === "lights_off");
+  }
+
   private getBorrowDirection(x: number, y: number) {
     if (Math.abs(x) < 0.2 && Math.abs(y) < 0.2) {
       return null;
@@ -827,4 +919,10 @@ function softenColor(r: number, g: number, b: number) {
     g: Math.round(g + (255 - g) * 0.3),
     b: Math.round(b + (255 - b) * 0.3),
   };
+}
+
+function distanceSq(ax: number, az: number, bx: number, bz: number) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return (dx * dx) + (dz * dz);
 }

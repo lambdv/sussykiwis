@@ -40,7 +40,9 @@ pub fn request_to_command(id: Uuid, request: ClientRequest) -> Option<GameComman
             from_index,
             to_index,
         }),
-        ClientRequest::EnterBorrow { borrow_id } => Some(GameCommand::EnterBorrow { id, borrow_id }),
+        ClientRequest::EnterBorrow { borrow_id } => {
+            Some(GameCommand::EnterBorrow { id, borrow_id })
+        }
         ClientRequest::TraverseBorrow { direction } => {
             Some(GameCommand::TraverseBorrow { id, direction })
         }

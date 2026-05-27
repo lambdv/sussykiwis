@@ -30,36 +30,34 @@ pub async fn read_join_message(
         };
 
         match message {
-            Message::Text(text) => {
-                match serde_json::from_str::<ClientRequest>(&text) {
-                    Ok(ClientRequest::Join { name, spectator }) => {
-                        return Ok(JoinRequest { name, spectator });
-                    }
-                    Ok(ClientRequest::ClientLog {
-                        scope,
-                        event,
-                        client_time,
-                        details,
-                    }) => {
-                        let details = details.unwrap_or(serde_json::Value::Null);
-                        debug!(
-                            scope = %scope,
-                            event = %event,
-                            client_time = %client_time,
-                            details = %details,
-                            "HANDSHAKE: pre-join client log"
-                        );
-                    }
-                    Ok(other) => {
-                        debug!(request = ?other, "HANDSHAKE: unexpected request type");
-                        return Err(());
-                    }
-                    Err(_) => {
-                        debug!(raw = %text.chars().take(120).collect::<String>(), "HANDSHAKE: non-json payload");
-                        return Err(());
-                    }
+            Message::Text(text) => match serde_json::from_str::<ClientRequest>(&text) {
+                Ok(ClientRequest::Join { name, spectator }) => {
+                    return Ok(JoinRequest { name, spectator });
                 }
-            }
+                Ok(ClientRequest::ClientLog {
+                    scope,
+                    event,
+                    client_time,
+                    details,
+                }) => {
+                    let details = details.unwrap_or(serde_json::Value::Null);
+                    debug!(
+                        scope = %scope,
+                        event = %event,
+                        client_time = %client_time,
+                        details = %details,
+                        "HANDSHAKE: pre-join client log"
+                    );
+                }
+                Ok(other) => {
+                    debug!(request = ?other, "HANDSHAKE: unexpected request type");
+                    return Err(());
+                }
+                Err(_) => {
+                    debug!(raw = %text.chars().take(120).collect::<String>(), "HANDSHAKE: non-json payload");
+                    return Err(());
+                }
+            },
             Message::Binary(data) => {
                 debug!(len = data.len(), "HANDSHAKE: binary frame");
                 return Err(());

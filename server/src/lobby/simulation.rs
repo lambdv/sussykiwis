@@ -263,12 +263,18 @@ struct HideZone {
 }
 
 fn load_hide_zones(ldtk_json: &str) -> Vec<HideZone> {
-    let project: LdtkProjectData = serde_json::from_str(ldtk_json).expect("match LDtk must deserialize");
-    let level = project.levels.into_iter().next().expect("LDtk must contain one level");
+    let project: LdtkProjectData =
+        serde_json::from_str(ldtk_json).expect("match LDtk must deserialize");
+    let level = project
+        .levels
+        .into_iter()
+        .next()
+        .expect("LDtk must contain one level");
     let mut zones = Vec::new();
     for layer in &level.layer_instances {
         for entity in &layer.entity_instances {
-            let hide_layer = entity.field_instances
+            let hide_layer = entity
+                .field_instances
                 .iter()
                 .find(|f| f.identifier == "hide_layer")
                 .and_then(|f| f.value.as_str());
@@ -283,7 +289,12 @@ fn load_hide_zones(ldtk_json: &str) -> Vec<HideZone> {
             let z = entity.px[1] as f32 / grid_size - half_h;
             let w = entity.width as f32 / grid_size;
             let h = entity.height as f32 / grid_size;
-            zones.push(HideZone { x, z, width: w, height: h });
+            zones.push(HideZone {
+                x,
+                z,
+                width: w,
+                height: h,
+            });
         }
     }
     zones
@@ -838,20 +849,8 @@ impl World {
             return;
         }
 
-        let Some(station_index) = self.active_station_for_player(id) else {
-            return;
-        };
-
-        // Client has already validated this was a miss — just reset the timer for sync.
-        if let Some(station) = self.puzzle_stations.get_mut(station_index) {
-            if let Some(PuzzleOccupant {
-                state: ActivePuzzleState::Timer(timer),
-                ..
-            }) = station.occupant.as_mut()
-            {
-                timer.started_at_tick = self.tick;
-            }
-        }
+        // A missed tap should not restart the spinner; the client keeps rendering the live dial.
+        let _ = self.active_station_for_player(id);
     }
 
     fn handle_puzzle_solved(&mut self, id: Uuid) {
@@ -1052,7 +1051,8 @@ impl World {
                         projection: station.occupant.as_ref().map(|occupant| {
                             match &occupant.state {
                                 ActivePuzzleState::Timer(timer) => PuzzleProjectionState::Timer {
-                                    started_at: timer.started_at_tick * 1000 / self.tick_rate as u64,
+                                    started_at: timer.started_at_tick * 1000
+                                        / self.tick_rate as u64,
                                     target_start: timer.target_start,
                                     target_size: TIMER_TARGET_SIZE,
                                 },
@@ -1111,7 +1111,8 @@ impl World {
             return;
         };
 
-        if !matches!(self.phase, GamePhase::Playing) || !matches!(player.role, PlayerRole::Imposter) {
+        if !matches!(self.phase, GamePhase::Playing) || !matches!(player.role, PlayerRole::Imposter)
+        {
             return;
         }
 
@@ -1154,7 +1155,12 @@ impl World {
     }
 
     fn teleport_player_to_borrow(&mut self, player_id: Uuid, borrow_id: Uuid) {
-        let Some(borrow) = self.kiwi_borrows.iter().find(|borrow| borrow.id == borrow_id).cloned() else {
+        let Some(borrow) = self
+            .kiwi_borrows
+            .iter()
+            .find(|borrow| borrow.id == borrow_id)
+            .cloned()
+        else {
             return;
         };
 
@@ -1582,7 +1588,11 @@ fn create_puzzle_stations() -> Vec<PuzzleStation> {
         .enumerate()
         .map(|(index, entity)| PuzzleStation {
             id: entity.iid,
-            kind: if index % 2 == 0 { PuzzleKind::Timer } else { PuzzleKind::Wires },
+            kind: if index % 2 == 0 {
+                PuzzleKind::Timer
+            } else {
+                PuzzleKind::Wires
+            },
             x: entity.x,
             z: entity.z,
             occupant: None,
@@ -1628,8 +1638,13 @@ struct EntityPoint {
 }
 
 fn load_entity_points(ldtk_json: &str, layer_identifier: &str) -> Vec<EntityPoint> {
-    let project: LdtkProjectData = serde_json::from_str(ldtk_json).expect("LDtk JSON must deserialize");
-    let level = project.levels.into_iter().next().expect("LDtk must contain one level");
+    let project: LdtkProjectData =
+        serde_json::from_str(ldtk_json).expect("LDtk JSON must deserialize");
+    let level = project
+        .levels
+        .into_iter()
+        .next()
+        .expect("LDtk must contain one level");
     let layer = level
         .layer_instances
         .into_iter()
@@ -1824,6 +1839,15 @@ mod tests {
         world.try_start_match();
         assert_eq!(world.phase, GamePhase::Playing);
         assert!(world.lobby_countdown_ends_at_tick.is_none());
+    }
+
+    #[test]
+    fn shared_match_spawn_is_not_inside_collision() {
+        // Keep the shared spawn point on an authored walkable tile.
+        let collision = load_match_collision_map();
+        let (spawn_x, spawn_z) = pick_spawn_position(0);
+
+        assert!(!cell_is_solid(&collision, spawn_x, spawn_z));
     }
 
     #[test]
@@ -2121,6 +2145,54 @@ mod tests {
     }
 
     #[test]
+    fn timer_puzzle_tap_keeps_spinner_running_after_miss() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut world = World::new(event_tx);
+        let player_id = Uuid::new_v4();
+
+        world.players.insert(
+            player_id,
+            Player {
+                id: player_id,
+                name: "Crewmate".to_string(),
+                color: "#fff".to_string(),
+                x: world.puzzle_stations[0].x,
+                z: world.puzzle_stations[0].z,
+                facing_left: false,
+                move_x: 0.0,
+                move_z: 0.0,
+                last_seq: 0,
+                role: PlayerRole::Crewmate,
+                state: PlayerState::Alive,
+                current_borrow_id: None,
+                kill_cooldown_ends_at_tick: 0,
+                completed_puzzle_station_ids: HashSet::new(),
+            },
+        );
+        world.phase = GamePhase::Playing;
+        world.tick = 42;
+        world.puzzle_stations[0].occupant = Some(PuzzleOccupant {
+            player_id,
+            state: ActivePuzzleState::Timer(TimerPuzzleState {
+                started_at_tick: 7,
+                target_start: 0.0,
+            }),
+        });
+
+        world.handle_puzzle_tap(player_id);
+
+        let Some(PuzzleOccupant {
+            state: ActivePuzzleState::Timer(timer),
+            ..
+        }) = world.puzzle_stations[0].occupant.as_ref()
+        else {
+            panic!("timer occupant present");
+        };
+
+        assert_eq!(timer.started_at_tick, 7);
+    }
+
+    #[test]
     fn all_completed_tasks_emit_crew_win() {
         let (event_tx, _) = broadcast::channel(16);
         let mut event_rx = event_tx.subscribe();
@@ -2222,7 +2294,11 @@ mod tests {
         world.tick();
 
         let player = world.players.get(&player_id).expect("player present");
-        assert!(player.x <= -5.0, "player should stop before the wall, got x={}", player.x);
+        assert!(
+            player.x <= -5.0,
+            "player should stop before the wall, got x={}",
+            player.x
+        );
     }
 }
 
@@ -2298,7 +2374,9 @@ fn load_collision_map_from_intgrid(ldtk_json: &str, layer_identifier: &str) -> C
         .into_iter()
         .next()
         .expect("LDtk must contain one level");
-    let layers = level.layer_instances.expect("LDtk level must contain layers");
+    let layers = level
+        .layer_instances
+        .expect("LDtk level must contain layers");
     let collisions = layers
         .into_iter()
         .find(|layer| layer.identifier == layer_identifier)
@@ -2311,7 +2389,11 @@ fn load_collision_map_from_intgrid(ldtk_json: &str, layer_identifier: &str) -> C
         height,
         half_width: width as f32 / 2.0,
         half_height: height as f32 / 2.0,
-        solid: collisions.int_grid_csv.into_iter().map(|value| value != 0).collect(),
+        solid: collisions
+            .int_grid_csv
+            .into_iter()
+            .map(|value| value != 0)
+            .collect(),
     }
 }
 
@@ -2322,11 +2404,17 @@ fn load_collision_map_from_solid_layers(ldtk_json: &str) -> CollisionMap {
         .into_iter()
         .next()
         .expect("match LDtk must contain one level");
-    let layers = level.layer_instances.expect("match LDtk level must contain layers");
+    let layers = level
+        .layer_instances
+        .expect("match LDtk level must contain layers");
     let base = layers
         .iter()
         .find(|layer| layer.identifier == "Land")
-        .or_else(|| layers.iter().find(|layer| layer.layer_instance_type == "Tiles"))
+        .or_else(|| {
+            layers
+                .iter()
+                .find(|layer| layer.layer_instance_type == "Tiles")
+        })
         .expect("match LDtk must contain at least one tile layer");
     let width = base.c_wid.max(0) as usize;
     let height = base.c_hei.max(0) as usize;
@@ -2338,6 +2426,7 @@ fn load_collision_map_from_solid_layers(ldtk_json: &str) -> CollisionMap {
             && layer.identifier != "Land"
             && layer.identifier != "Ground"
             && layer.identifier != "CaveRoof"
+            && layer.identifier != "Trees"
     }) {
         for tile in layer.grid_tiles {
             let px = tile.px.get(0).copied().unwrap_or_default();
@@ -2392,18 +2481,6 @@ fn pick_player_color(index: usize) -> (&'static str, &'static str) {
     COLORS[index % COLORS.len()]
 }
 
-fn pick_spawn_position(index: usize) -> (f32, f32) {
-    const SPAWNS: [(f32, f32); 10] = [
-        (0.0, 0.0),
-        (4.0, 0.0),
-        (-4.0, 0.0),
-        (0.0, 4.0),
-        (0.0, -4.0),
-        (6.0, 3.0),
-        (-6.0, 3.0),
-        (6.0, -3.0),
-        (-6.0, -3.0),
-        (0.0, 7.0),
-    ];
-    SPAWNS[index % SPAWNS.len()]
+fn pick_spawn_position(_index: usize) -> (f32, f32) {
+    (0.0, 0.0)
 }

@@ -2,12 +2,12 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::lobby::networking::commands::{request_to_command, send_message};
-use crate::lobby::networking::handshake::{read_join_message, JoinRequest};
+use crate::lobby::networking::handshake::{JoinRequest, read_join_message};
 use crate::lobby::networking::model::{ClientRequest, ServerEvent, ServerResponse};
 use crate::lobby::simulation::{GameCommand, MOVE_SPEED, TICK_RATE};
 use crate::server::ServerContext;
