@@ -21,6 +21,7 @@ export type ClientSessionState = {
   revealEndsAt: number | null;
   ejectionMessage: string | null;
   win: WinViewState | null;
+  roleRevealPlayers: { id: string; name: string; color: string; role: PlayerRole }[];
 };
 
 type SessionListener = (state: ClientSessionState) => void;
@@ -39,6 +40,7 @@ export class ClientSession {
     revealEndsAt: null,
     ejectionMessage: null,
     win: null,
+    roleRevealPlayers: [],
   };
   private joinToken = 0;
   private revealTimer: number | null = null;
@@ -47,16 +49,17 @@ export class ClientSession {
   private hasShownRoleReveal = false;
   private previousSubState: WorldSnapshot["subState"] | null = null;
   private reconnectViewMode: ViewMode | null = null;
+  private offMessage: (() => void) | null = null;
+  private offDisconnect: (() => void) | null = null;
 
   constructor() {
-    this.network.onMessage((message) => {
+    this.offMessage = this.network.onMessage((message) => {
       this.handleMessage(message);
     });
 
-    this.network.onDisconnect((wasIntentional) => {
+    this.offDisconnect = this.network.onDisconnect((wasIntentional) => {
       this.patchState({ connected: false, notice: "Disconnected from server" });
 
-      // Retry the same join path automatically after an unexpected drop.
       if (!wasIntentional && this.reconnectViewMode) {
         this.startJoinLoop(this.reconnectViewMode);
       }
@@ -93,6 +96,7 @@ export class ClientSession {
       revealEndsAt: null,
       ejectionMessage: null,
       win: null,
+      roleRevealPlayers: [],
     };
     this.emit();
   }
@@ -125,6 +129,7 @@ export class ClientSession {
       revealEndsAt: null,
       ejectionMessage: null,
       win: null,
+      roleRevealPlayers: [],
     });
 
     void this.tryJoin(viewMode, token, 0);
@@ -200,6 +205,8 @@ export class ClientSession {
   }
 
   dispose() {
+    this.offMessage?.();
+    this.offDisconnect?.();
     this.clearTransientTimers();
     this.reconnectViewMode = null;
     this.network.disconnect();
@@ -358,12 +365,33 @@ export class ClientSession {
   private startRoleReveal() {
     this.clearRevealTimer();
     this.hasShownRoleReveal = true;
-    const revealEndsAt = Date.now() + 6000;
-    this.patchState({ route: "roleAssignment", revealEndsAt });
+
+    const players = this.state.snapshot?.players ?? [];
+    const localRole = this.state.localRole;
+    const localPlayerId = this.state.localPlayerId;
+
+    let revealPlayers: { id: string; name: string; color: string; role: PlayerRole }[];
+    if (localRole === "imposter") {
+      revealPlayers = players.filter((p) => p.role === "imposter");
+    } else {
+      revealPlayers = players.map((p) => ({ id: p.id, name: p.name, color: p.color, role: p.role }));
+    }
+
+    // Sort so local player is in the center position
+    const sorted = [...revealPlayers];
+    const localIdx = sorted.findIndex((p) => p.id === localPlayerId);
+    if (localIdx >= 0) {
+      const [local] = sorted.splice(localIdx, 1);
+      const half = Math.floor(sorted.length / 2);
+      sorted.splice(half, 0, local);
+    }
+
+    const revealEndsAt = Date.now() + 3000;
+    this.patchState({ route: "roleAssignment", revealEndsAt, roleRevealPlayers: sorted });
     this.revealTimer = window.setTimeout(() => {
       this.revealTimer = null;
-      this.patchState({ route: "world", revealEndsAt: null });
-    }, 6000);
+      this.patchState({ route: "world", revealEndsAt: null, roleRevealPlayers: [] });
+    }, 3000);
   }
 
   private showEjectionMessage(message: string) {

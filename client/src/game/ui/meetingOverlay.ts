@@ -34,21 +34,25 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
   const input = document.createElement("textarea");
   const send = document.createElement("button");
 
-  const wireAction = (button: HTMLButtonElement, onActivate: () => void) => {
-    // Fire on pointer down so taps are not lost on mobile browsers.
-    button.style.touchAction = "manipulation";
-    button.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      if (button.disabled) return;
-      onActivate();
-    });
-  };
+  // Single delegation listener covers all vote buttons without per-button leaks.
+  roster.style.touchAction = "manipulation";
+  roster.addEventListener("pointerdown", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-vote-target]");
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    const target = button.dataset.voteTarget;
+    if (target === "skip") options.onVote("skip");
+    else if (target) options.onVote(target);
+  });
 
   // Keep chat visible on both variants, but only players can submit new messages.
   input.placeholder = "Send a chat message";
   input.rows = 3;
   send.textContent = "Send";
-  wireAction(send, () => {
+  send.style.touchAction = "manipulation";
+  send.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    if (send.disabled) return;
     if (options.getReadOnly()) return;
     const message = input.value.trim();
     if (!message) return;
@@ -102,7 +106,8 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
         if (!readOnly) {
           const button = document.createElement("button");
           button.textContent = "Vote";
-          wireAction(button, () => options.onVote(player.id));
+          button.dataset.voteTarget = player.id;
+          button.style.touchAction = "manipulation";
           row.appendChild(button);
         }
 
@@ -116,7 +121,8 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
       if (!readOnly) {
         const skipButton = document.createElement("button");
         skipButton.textContent = "Skip Vote";
-        wireAction(skipButton, () => options.onVote("skip"));
+        skipButton.dataset.voteTarget = "skip";
+        skipButton.style.touchAction = "manipulation";
         skipRow.appendChild(skipButton);
       }
 
@@ -131,8 +137,8 @@ export function createMeetingOverlay(options: MeetingOverlayOptions) {
     },
 
     dispose() {
-      // Remove the overlay cleanly when the owning scene is disposed.
       root.remove();
+      roster.replaceChildren();
     },
   };
 }

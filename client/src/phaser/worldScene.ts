@@ -36,13 +36,14 @@ type PuzzleVisual = {
   container: Phaser.GameObjects.Container;
   ring: Phaser.GameObjects.Arc;
   label: Phaser.GameObjects.Text;
+  icon: Phaser.GameObjects.Image;
   miniPuzzle: Phaser.GameObjects.Graphics;
 };
 
 type BorrowVisual = {
   container: Phaser.GameObjects.Container;
   ring: Phaser.GameObjects.Arc;
-  label: Phaser.GameObjects.Text;
+  icon: Phaser.GameObjects.Image;
 };
 
 export class WorldScene extends Phaser.Scene {
@@ -113,6 +114,9 @@ export class WorldScene extends Phaser.Scene {
     // Load the shared kiwi source sprite once, then recolor it per player in memory.
     this.load.image("kiwi-source", "/assets/2d/kwi.png");
     this.load.image("kiwi-fruit", "/assets/kiwis/kiwi_fruit.png");
+    this.load.image("spinner", "/assets/2d/spinner.png");
+    this.load.image("breadboard", "/assets/2d/breadboard.png");
+    this.load.image("borrow", "/assets/2d/borrow.png");
     this.load.json("lobby-ldtk", "/assets/game.ldtk");
     this.load.json("match-ldtk", "/assets/amongus.ldtk");
   }
@@ -538,29 +542,20 @@ const visual = {
 
   private createPuzzle(id: string, kind: PuzzleKind) {
     const ring = this.add.circle(0, 0, 16, 0x111827, 0.9).setStrokeStyle(4, kind === "timer" ? 0xc084fc : 0x38bdf8, 1);
-    const label = this.add.text(0, 0, kind === "timer" ? "T" : "W", {
-      fontFamily: "Arial, sans-serif",
-      fontSize: "14px",
-      color: "#e2e8f0",
-    }).setOrigin(0.5);
-    
-    // An optional mini puzzle view for spectators
+    const icon = this.add.image(0, 0, kind === "timer" ? "spinner" : "breadboard").setDisplaySize(24, 24);
     const miniPuzzle = this.add.graphics({ x: 0, y: -30 }).setAlpha(0);
-    const container = this.add.container(0, 0, [ring, label, miniPuzzle]).setDepth(6);
-    const visual = { container, ring, label, miniPuzzle };
+    const label = this.add.text(0, -20, "", { fontSize: "12px", color: "#ffffff" }).setOrigin(0.5);
+    const container = this.add.container(0, 0, [ring, icon, miniPuzzle, label]).setDepth(6);
+    const visual = { container, ring, icon, miniPuzzle, label };
     this.puzzles.set(id, visual);
     return visual;
   }
 
   private createBorrow(id: string) {
     const ring = this.add.circle(0, 0, 13, 0x7c3aed, 0.95).setStrokeStyle(4, 0xf5d0fe, 1);
-    const label = this.add.text(0, 0, "KB", {
-      fontFamily: "Arial, sans-serif",
-      fontSize: "12px",
-      color: "#f8fafc",
-    }).setOrigin(0.5);
-    const container = this.add.container(0, 0, [ring, label]).setDepth(7);
-    const visual = { container, ring, label };
+    const icon = this.add.image(0, 0, "borrow").setDisplaySize(18, 18);
+    const container = this.add.container(0, 0, [ring, icon]).setDepth(7);
+    const visual = { container, ring, icon };
     this.borrows.set(id, visual);
     return visual;
   }

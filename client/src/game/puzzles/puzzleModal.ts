@@ -60,10 +60,11 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
   closeButton.style.color = "#f8fafc";
   closeButton.style.fontWeight = "700";
   closeButton.style.touchAction = "manipulation";
-  closeButton.addEventListener("pointerdown", (event) => {
+  const onClosePointerDown = (event: PointerEvent) => {
     event.preventDefault();
     actions.onCancel();
-  });
+  };
+  closeButton.addEventListener("pointerdown", onClosePointerDown);
 
   canvas.width = 900;
   canvas.height = 900;
@@ -73,7 +74,7 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
   canvas.style.background = "#08111f";
   canvas.style.touchAction = "none";
 
-  canvas.addEventListener("pointerdown", (event) => {
+  const onCanvasPointerDown = (event: PointerEvent) => {
     const projection = currentState.station?.projection;
     if (!projection) return;
 
@@ -98,15 +99,17 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
     const layout = createWireLayout(canvas.width, canvas.height, projection);
     dragState.fromIndex = pickWireSocket(layout, "left", point.x, point.y);
     render();
-  });
+  };
+  canvas.addEventListener("pointerdown", onCanvasPointerDown);
 
-  canvas.addEventListener("pointermove", (event) => {
+  const onCanvasPointerMove = (event: PointerEvent) => {
     if (dragState.fromIndex === null) return;
     const point = getCanvasPoint(canvas, event);
     dragState.pointerX = point.x;
     dragState.pointerY = point.y;
     render();
-  });
+  };
+  canvas.addEventListener("pointermove", onCanvasPointerMove);
 
   const finishWireDrag = (event: PointerEvent) => {
     const projection = currentState.station?.projection;
@@ -181,6 +184,11 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
     },
     dispose() {
       root.remove();
+      closeButton.removeEventListener("pointerdown", onClosePointerDown);
+      canvas.removeEventListener("pointerdown", onCanvasPointerDown);
+      canvas.removeEventListener("pointermove", onCanvasPointerMove);
+      canvas.removeEventListener("pointerup", finishWireDrag);
+      canvas.removeEventListener("pointercancel", finishWireDrag);
     },
   };
 }

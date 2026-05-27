@@ -2107,7 +2107,7 @@ mod tests {
             }),
         });
 
-        world.handle_puzzle_tap(player_id);
+        world.handle_puzzle_solved(player_id);
 
         assert!(
             world

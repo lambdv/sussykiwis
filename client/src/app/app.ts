@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { ClientSession, type AppRoute } from "../core/session";
+import { RoleRevealScene } from "../phaser/roleRevealScene";
 import { WorldScene } from "../phaser/worldScene";
 import { createAppUi } from "./ui";
 import type { BootstrapRoute } from "./bootstrapRoute";
@@ -8,6 +9,7 @@ export class App {
   private session = new ClientSession();
   private ui: ReturnType<typeof createAppUi>;
   private game: Phaser.Game;
+  private unsubscribe: (() => void) | null = null;
 
   constructor(parent: HTMLElement, initialRoute: AppRoute | BootstrapRoute) {
     // Keep the renderer focused on the world while the session and DOM own app flow.
@@ -30,6 +32,8 @@ export class App {
       disableContextMenu: true,
       banner: false,
     });
+    // Register the dedicated reveal scene separately so route changes can control it.
+    this.game.scene.add("roleReveal", new RoleRevealScene(this.session), false);
 
     // Resume web audio on first user gesture so mobile/Chrome audio can start.
     const unlockAudio = () => {
@@ -43,6 +47,19 @@ export class App {
     window.addEventListener("touchstart", unlockAudio, { once: true, passive: true });
 
     this.ui = createAppUi(this.session);
+    this.unsubscribe = this.session.subscribe((state) => {
+      const revealRunning = this.game.scene.isActive("roleReveal");
+      if (state.route === "roleAssignment") {
+        if (!revealRunning) {
+          this.game.scene.start("roleReveal");
+        }
+        return;
+      }
+
+      if (revealRunning) {
+        this.game.scene.stop("roleReveal");
+      }
+    });
 
     if (initialRoute === "openday") {
       window.requestAnimationFrame(() => {
@@ -58,6 +75,8 @@ export class App {
   }
 
   dispose() {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     this.ui.dispose();
     this.session.dispose();
     this.game.destroy(true);

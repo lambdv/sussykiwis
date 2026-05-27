@@ -24,7 +24,7 @@ project code name: 'sussy kiwis' is a among us clone video game where you can pl
 - Client scenes render UI and send player input.
 - Server simulation validates input and broadcasts state changes.
 - Websocket messages connect the two and carry game events.
-- Docker runs nginx at `http://localhost:8080/` and proxies the API at `/api/*`.
+- don't use docker, use locally cargo and bun to do things not docker
 
 ## Coding guidelines:
 - document all code you make with inline comments for unit blocks explaining what it does

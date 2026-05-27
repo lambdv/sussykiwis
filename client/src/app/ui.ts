@@ -112,9 +112,6 @@ export function createAppUi(session: ClientSession) {
     }
 
     if (state.route === "roleAssignment") {
-      modal.style.display = "flex";
-      modalTitle.textContent = formatRoleName(state.localRole);
-      modalBody.textContent = `${formatRoleObjective(state.localRole)}${formatRevealCountdown(state.revealEndsAt)}`;
       return;
     }
 
@@ -138,7 +135,7 @@ export function createAppUi(session: ClientSession) {
     const isLobby = state.snapshot?.phase === "lobby";
 
     // Only players need the status panel; spectator/server view stays clean.
-    status.style.display = state.viewMode === "player" && (state.route === "world" || state.route === "roleAssignment" || state.route === "win")
+    status.style.display = state.viewMode === "player" && (state.route === "world" || state.route === "win")
       ? "block"
       : "none";
     status.innerHTML = [
@@ -273,33 +270,6 @@ function setButtonState(button: HTMLButtonElement, enabled: boolean, label: stri
   button.textContent = label;
   button.disabled = !enabled;
   button.onclick = enabled ? onPress : null;
-}
-
-function formatRoleName(role: string | null) {
-  if (!role) return "Preparing role reveal";
-  return role.charAt(0).toUpperCase() + role.slice(1);
-}
-
-function formatRoleObjective(role: string | null) {
-  switch (role) {
-    case "imposter":
-      return "Blend in, sabotage the crew, and secure parity.";
-    case "sheriff":
-      return "Complete tasks and use your kill carefully.";
-    case "crewmate":
-      return "Complete tasks, report bodies, and find the imposters.";
-    default:
-      return "Syncing with the server.";
-  }
-}
-
-function formatRevealCountdown(revealEndsAt: number | null) {
-  if (revealEndsAt === null) {
-    return "";
-  }
-
-  const secondsLeft = Math.max(0, Math.ceil((revealEndsAt - Date.now()) / 1000));
-  return ` Gameplay starts in ${secondsLeft}s.`;
 }
 
 function formatLobbyStatus(snapshot: NonNullable<ClientSessionState["snapshot"]>) {
