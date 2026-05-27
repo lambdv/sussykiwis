@@ -1,5 +1,7 @@
 import Phaser from "phaser";
 import { PlayerInputController } from "../core/inputController";
+
+let lastSnapshotRxTime = 0;
 import {
   canLocallyMove,
   getFacingFromMovement,
@@ -264,7 +266,8 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private syncPuzzles(snapshot: WorldSnapshot) {
-    // Keep the pre-match lobby visually empty so gameplay stations only appear once the live round starts.
+    lastSnapshotRxTime = Date.now();
+
     if (snapshot.phase === "lobby") {
       for (const [id, visual] of this.puzzles) {
         visual.container.destroy();
@@ -298,7 +301,8 @@ export class WorldScene extends Phaser.Scene {
           visual.miniPuzzle.fillRect(-20, -20, 40, 40);
           
           if (station.projection.kind === "timer") {
-            const angle = station.projection.dialAngle;
+            const serverElapsed = snapshot.serverTime - station.projection.startedAt;
+            const angle = ((serverElapsed + (Date.now() - lastSnapshotRxTime)) * 0.28 * 20 / 1000) % (Math.PI * 2);
             visual.miniPuzzle.lineStyle(2, 0xf472b6);
             visual.miniPuzzle.beginPath();
             visual.miniPuzzle.moveTo(0, 0);

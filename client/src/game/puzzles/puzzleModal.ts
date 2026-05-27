@@ -1,15 +1,17 @@
 import type { PuzzleStationSnapshot, SnapshotPlayer } from "../../networking/message";
-import { drawTimerPuzzleScene } from "./timerPuzzleScene";
+import { drawTimerPuzzleScene, isTimerTapValid } from "./timerPuzzleScene";
 import { createWireLayout, drawWiresPuzzleScene, pickWireSocket } from "./wiresPuzzleScene";
 
 type PuzzleModalState = {
   station: PuzzleStationSnapshot | null;
   player: SnapshotPlayer | null;
+  serverTime: number;
 };
 
 type PuzzleModalActions = {
   onCancel: () => void;
   onTap: () => void;
+  onSolved: () => void;
   onConnect: (fromIndex: number, toIndex: number) => void;
 };
 
@@ -22,7 +24,7 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
   const dragState = { fromIndex: null as number | null, pointerX: 0, pointerY: 0 };
-  let currentState: PuzzleModalState = { station: null, player: null };
+  let currentState: PuzzleModalState = { station: null, player: null, serverTime: 0 };
 
   // Mount a fullscreen modal so the local player can focus on the task while the world keeps running underneath.
   root.style.position = "fixed";
@@ -71,7 +73,6 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
   canvas.style.background = "#08111f";
   canvas.style.touchAction = "none";
 
-  // Send local puzzle inputs back to the server so the simulation remains authoritative.
   canvas.addEventListener("pointerdown", (event) => {
     const projection = currentState.station?.projection;
     if (!projection) return;
@@ -82,7 +83,11 @@ export function createPuzzleModal(actions: PuzzleModalActions) {
     dragState.pointerY = point.y;
 
     if (projection.kind === "timer") {
-      actions.onTap();
+      if (isTimerTapValid(projection)) {
+        actions.onSolved();
+      } else {
+        actions.onTap();
+      }
       return;
     }
 

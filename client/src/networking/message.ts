@@ -34,7 +34,7 @@ export type KiwiBorrowSnapshot = {
 };
 
 export type PuzzleProjectionState =
-  | { kind: "timer"; dialAngle: number; targetStart: number; targetSize: number }
+  | { kind: "timer"; startedAt: number; targetStart: number; targetSize: number }
   | { kind: "wires"; leftColors: WireColor[]; rightColors: WireColor[]; connectedPairs: WireConnection[] };
 
 export type PuzzleStationSnapshot = {
@@ -58,6 +58,7 @@ export type ClientMessage =
   | { type: "start_puzzle"; stationId: string }
   | { type: "cancel_puzzle" }
   | { type: "puzzle_tap" }
+  | { type: "puzzle_solved" }
   | { type: "puzzle_connect"; fromIndex: number; toIndex: number }
   | { type: "enter_borrow"; borrowId: string }
   | { type: "traverse_borrow"; direction: BorrowDirection }

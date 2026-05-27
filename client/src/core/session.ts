@@ -171,6 +171,10 @@ export class ClientSession {
     this.network.sendMessage({ type: "puzzle_tap" });
   }
 
+  puzzleSolved() {
+    this.network.sendMessage({ type: "puzzle_solved" });
+  }
+
   puzzleConnect(fromIndex: number, toIndex: number) {
     this.network.sendMessage({ type: "puzzle_connect", fromIndex, toIndex });
   }

@@ -42,6 +42,7 @@ pub mod model {
         },
         CancelPuzzle,
         PuzzleTap,
+        PuzzleSolved,
         PuzzleConnect {
             #[serde(rename = "fromIndex")]
             from_index: usize,
@@ -216,8 +217,8 @@ pub mod model {
     #[serde(tag = "kind", rename_all = "snake_case")]
     pub enum PuzzleProjectionState {
         Timer {
-            #[serde(rename = "dialAngle")]
-            dial_angle: f32,
+            #[serde(rename = "startedAt")]
+            started_at: u64,
             #[serde(rename = "targetStart")]
             target_start: f32,
             #[serde(rename = "targetSize")]

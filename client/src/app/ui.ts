@@ -65,6 +65,7 @@ export function createAppUi(session: ClientSession) {
   const puzzleModal = createPuzzleModal({
     onCancel: () => session.cancelPuzzle(),
     onTap: () => session.puzzleTap(),
+    onSolved: () => session.puzzleSolved(),
     onConnect: (fromIndex, toIndex) => session.puzzleConnect(fromIndex, toIndex),
   });
 
@@ -244,7 +245,7 @@ export function createAppUi(session: ClientSession) {
     }
 
     const activePuzzle = state.snapshot?.puzzleStations.find((station) => station.occupiedBy === state.localPlayerId) ?? null;
-    puzzleModal.update({ station: activePuzzle, player: localPlayer });
+    puzzleModal.update({ station: activePuzzle, player: localPlayer, serverTime: state.snapshot?.serverTime ?? 0 });
 
     ejectionBanner.style.display = state.ejectionMessage ? "block" : "none";
     ejectionBanner.textContent = state.ejectionMessage ?? "";

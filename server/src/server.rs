@@ -30,6 +30,25 @@ pub struct Config {
     pub tick_rate: u32,
 }
 
+/// all the state of the axum app / game server
+#[derive(Clone)]
+pub struct ServerContext {
+    // sender / transport of client packets to the game loop
+    pub command_tx: mpsc::Sender<GameCommand>,
+    pub event_tx: broadcast::Sender<ServerEvent>,
+}
+impl ServerContext {
+    pub fn new(
+        command_tx: mpsc::Sender<GameCommand>,
+        event_tx: broadcast::Sender<ServerEvent>,
+    ) -> Self {
+        Self {
+            command_tx,
+            event_tx,
+        }
+    }
+}
+
 // the actual app server
 pub async fn start_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -59,25 +78,6 @@ pub async fn start_server(config: Config) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// all the state of the axum app / game server
-#[derive(Clone)]
-pub struct ServerContext {
-    // sender / transport of client packets to the game loop
-    pub command_tx: mpsc::Sender<GameCommand>,
-    pub event_tx: broadcast::Sender<ServerEvent>,
-}
-impl ServerContext {
-    pub fn new(
-        command_tx: mpsc::Sender<GameCommand>,
-        event_tx: broadcast::Sender<ServerEvent>,
-    ) -> Self {
-        Self {
-            command_tx,
-            event_tx,
-        }
-    }
-}
-
 // the server app router
 pub fn get_app_router(state: ServerContext) -> axum::Router {
     // cross origin resource sharing policy for ws and http endpoints
@@ -89,10 +89,7 @@ pub fn get_app_router(state: ServerContext) -> axum::Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .route("/ws", any(ws_handler))
-        .route(
-            "/health",
-            get(|| async { (StatusCode::OK, "ok") }),
-        )
+        .route("/health", get(|| async { (StatusCode::OK, "ok") }))
         .route(
             "/ping",
             get(|| async {
@@ -358,6 +355,17 @@ async fn handle_socket(socket: WebSocket, context: ServerContext) {
                             break;
                         }
                     }
+                    ClientRequest::PuzzleSolved => {
+                        if context
+                            .command_tx
+                            .send(GameCommand::PuzzleSolved { id })
+                            .await
+                            .is_err()
+                        {
+                            warn!(client_id = %id, "SERVER GAME LOOP UNAVAILABLE DURING PUZZLE SOLVED");
+                            break;
+                        }
+                    }
                     ClientRequest::PuzzleConnect {
                         from_index,
                         to_index,
@@ -493,6 +501,7 @@ async fn read_join_message(
             | ClientRequest::StartPuzzle { .. }
             | ClientRequest::CancelPuzzle
             | ClientRequest::PuzzleTap
+            | ClientRequest::PuzzleSolved
             | ClientRequest::PuzzleConnect { .. }
             | ClientRequest::EnterBorrow { .. }
             | ClientRequest::TraverseBorrow { .. }

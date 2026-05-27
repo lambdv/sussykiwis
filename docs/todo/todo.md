@@ -1,0 +1,1 @@
+- remove visablity of kiwi from cave for server view

@@ -1,6 +1,5 @@
 /// Simulates the authoritative game world.
 use std::collections::{HashMap, HashSet};
-use std::f32::consts::TAU;
 use std::time::Duration;
 
 use ldtk2::Ldtk;
@@ -29,7 +28,6 @@ pub const MOVE_SPEED: f32 = 10.0;
 const LOBBY_COUNTDOWN_SECONDS: u64 = 1;
 const TOTAL_PUZZLES_PER_PLAYER: usize = 10;
 const TIMER_TARGET_SIZE: f32 = 0.8;
-const TIMER_ROTATION_PER_TICK: f32 = 0.28;
 const LOBBY_LDTK_JSON: &str = include_str!("../../../client/public/assets/game.ldtk");
 const MATCH_LDTK_JSON: &str = include_str!("../../../client/public/assets/amongus.ldtk");
 const MATCH_PASSABLE_TILE_KEYS: &[(&str, i64, i64)] = &[("Hobbit", 48, 16), ("Hobbit", 48, 64)];
@@ -98,6 +96,9 @@ pub enum GameCommand {
         id: Uuid,
     },
     PuzzleTap {
+        id: Uuid,
+    },
+    PuzzleSolved {
         id: Uuid,
     },
     PuzzleConnect {
@@ -237,6 +238,55 @@ struct LdtkEntityData {
     identifier: String,
     iid: Uuid,
     px: [i64; 2],
+    #[serde(default)]
+    width: i64,
+    #[serde(default)]
+    height: i64,
+    #[serde(default, rename = "fieldInstances")]
+    field_instances: Vec<LdtkFieldData>,
+}
+
+#[derive(Deserialize)]
+struct LdtkFieldData {
+    #[serde(rename = "__identifier")]
+    identifier: String,
+    #[serde(rename = "__value")]
+    value: serde_json::Value,
+}
+
+#[derive(Clone)]
+struct HideZone {
+    x: f32,
+    z: f32,
+    width: f32,
+    height: f32,
+}
+
+fn load_hide_zones(ldtk_json: &str) -> Vec<HideZone> {
+    let project: LdtkProjectData = serde_json::from_str(ldtk_json).expect("match LDtk must deserialize");
+    let level = project.levels.into_iter().next().expect("LDtk must contain one level");
+    let mut zones = Vec::new();
+    for layer in &level.layer_instances {
+        for entity in &layer.entity_instances {
+            let hide_layer = entity.field_instances
+                .iter()
+                .find(|f| f.identifier == "hide_layer")
+                .and_then(|f| f.value.as_str());
+            if hide_layer != Some("CaveRoof") {
+                continue;
+            }
+            let grid_size = layer.grid_size as f32;
+            let half_w = layer.cell_width as f32 / 2.0;
+            let half_h = layer.cell_height as f32 / 2.0;
+            // Convert pixel coords to game coords (same as entity points).
+            let x = entity.px[0] as f32 / grid_size - half_w;
+            let z = entity.px[1] as f32 / grid_size - half_h;
+            let w = entity.width as f32 / grid_size;
+            let h = entity.height as f32 / grid_size;
+            zones.push(HideZone { x, z, width: w, height: h });
+        }
+    }
+    zones
 }
 
 #[derive(Clone, Copy)]
@@ -264,6 +314,7 @@ pub struct World {
     move_speed: f32,
     lobby_collision: CollisionMap,
     match_collision: CollisionMap,
+    hide_zones: Vec<HideZone>,
     event_tx: broadcast::Sender<ServerEvent>,
 }
 
@@ -278,6 +329,7 @@ impl World {
             puzzle_stations: create_puzzle_stations(),
             kiwi_borrows: create_kiwi_borrows(),
             active_sabotages: Vec::new(),
+            hide_zones: load_hide_zones(MATCH_LDTK_JSON),
             phase: GamePhase::Lobby,
             round_locked: false,
             lobby_countdown_ends_at_tick: None,
@@ -355,6 +407,7 @@ impl World {
             GameCommand::StartPuzzle { id, station_id } => self.handle_start_puzzle(id, station_id),
             GameCommand::CancelPuzzle { id } => self.release_puzzle_for_player(id),
             GameCommand::PuzzleTap { id } => self.handle_puzzle_tap(id),
+            GameCommand::PuzzleSolved { id } => self.handle_puzzle_solved(id),
             GameCommand::PuzzleConnect {
                 id,
                 from_index,
@@ -781,7 +834,6 @@ impl World {
     }
 
     fn handle_puzzle_tap(&mut self, id: Uuid) {
-        // Ignore puzzle input unless the round is actively playing.
         if !matches!(self.phase, GamePhase::Playing) {
             return;
         }
@@ -790,32 +842,7 @@ impl World {
             return;
         };
 
-        let (station_id, solved) = {
-            let Some(station) = self.puzzle_stations.get_mut(station_index) else {
-                return;
-            };
-
-            let solved = match station.occupant.as_mut() {
-                Some(PuzzleOccupant {
-                    player_id,
-                    state: ActivePuzzleState::Timer(timer),
-                }) if *player_id == id => angle_in_arc(
-                    current_timer_angle(self.tick, timer),
-                    timer.target_start,
-                    TIMER_TARGET_SIZE,
-                ),
-                _ => return,
-            };
-
-            (station.id, solved)
-        };
-
-        if solved {
-            self.complete_puzzle(id, station_id);
-            return;
-        }
-
-        // Reset the timer timing window on a miss so the player must wait for a new pass.
+        // Client has already validated this was a miss — just reset the timer for sync.
         if let Some(station) = self.puzzle_stations.get_mut(station_index) {
             if let Some(PuzzleOccupant {
                 state: ActivePuzzleState::Timer(timer),
@@ -825,6 +852,19 @@ impl World {
                 timer.started_at_tick = self.tick;
             }
         }
+    }
+
+    fn handle_puzzle_solved(&mut self, id: Uuid) {
+        if !matches!(self.phase, GamePhase::Playing) {
+            return;
+        }
+
+        let Some(station_index) = self.active_station_for_player(id) else {
+            return;
+        };
+
+        let station_id = self.puzzle_stations[station_index].id;
+        self.complete_puzzle(id, station_id);
     }
 
     fn handle_puzzle_connect(&mut self, id: Uuid, from_index: usize, to_index: usize) {
@@ -955,6 +995,7 @@ impl World {
                 players: self
                     .players
                     .values()
+                    .filter(|player| !self.is_player_in_cave(player.x, player.z))
                     .map(|player| SnapshotPlayer {
                         id: player.id,
                         name: player.name.clone(),
@@ -1011,7 +1052,7 @@ impl World {
                         projection: station.occupant.as_ref().map(|occupant| {
                             match &occupant.state {
                                 ActivePuzzleState::Timer(timer) => PuzzleProjectionState::Timer {
-                                    dial_angle: current_timer_angle(self.tick, timer),
+                                    started_at: timer.started_at_tick * 1000 / self.tick_rate as u64,
                                     target_start: timer.target_start,
                                     target_size: TIMER_TARGET_SIZE,
                                 },
@@ -1039,6 +1080,13 @@ impl World {
         };
 
         let _ = self.event_tx.send(ServerEvent::Broadcast(payload));
+    }
+
+    /// Returns true if the player at (x, z) is inside any cave-style hide zone.
+    fn is_player_in_cave(&self, x: f32, z: f32) -> bool {
+        self.hide_zones.iter().any(|zone| {
+            x >= zone.x && x < zone.x + zone.width && z >= zone.z && z < zone.z + zone.height
+        })
     }
 
     fn current_sub_state(&self) -> GameSubState {
@@ -1498,17 +1546,6 @@ fn can_work_puzzles(player: &Player) -> bool {
 
 fn is_task_role(role: PlayerRole) -> bool {
     matches!(role, PlayerRole::Crewmate | PlayerRole::Sheriff)
-}
-
-fn current_timer_angle(tick: u64, timer: &TimerPuzzleState) -> f32 {
-    ((tick.saturating_sub(timer.started_at_tick) as f32) * TIMER_ROTATION_PER_TICK).rem_euclid(TAU)
-}
-
-fn angle_in_arc(angle: f32, arc_start: f32, arc_size: f32) -> bool {
-    let normalized_angle = angle.rem_euclid(TAU);
-    let normalized_start = arc_start.rem_euclid(TAU);
-    let delta = (normalized_angle - normalized_start).rem_euclid(TAU);
-    delta <= arc_size
 }
 
 fn pick_timer_target_start(station_id: Uuid, player_id: Uuid) -> f32 {
